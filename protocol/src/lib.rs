@@ -3,6 +3,7 @@
 
 pub mod messages;
 pub mod tcp;
+pub mod udp;
 
 /// 默认服务端口（TCP 与 UDP 同号）
 pub const DEFAULT_PORT: u16 = 9000;
