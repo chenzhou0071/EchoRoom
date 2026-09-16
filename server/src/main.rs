@@ -1,4 +1,6 @@
 //! EchoRoom 服务端：TCP 控制 + UDP 语音转发（单房间）。
+mod room;
+
 fn main() {
     let port = std::env::args()
         .nth(1)
