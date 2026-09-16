@@ -1,0 +1,12 @@
+# Rust
+/target
+**/target/
+
+# 客户端构建产物
+client/dist/
+client/src-tauri/target/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
