@@ -8,6 +8,158 @@ pub enum DecodeError {
     BadUtf8,
 }
 
+// ---------- 写 ----------
+
+fn put_str(out: &mut Vec<u8>, s: &str) {
+    let b = s.as_bytes();
+    out.extend_from_slice(&(b.len() as u16).to_be_bytes());
+    out.extend_from_slice(b);
+}
+
+pub fn encode(msg: &TcpMessage) -> Vec<u8> {
+    let mut payload = Vec::new();
+    match msg {
+        TcpMessage::Login { nickname } => put_str(&mut payload, nickname),
+        TcpMessage::LoginOk { uid, token, members } => {
+            payload.extend_from_slice(&uid.to_be_bytes());
+            payload.extend_from_slice(&token.to_be_bytes());
+            payload.extend_from_slice(&(members.len() as u16).to_be_bytes());
+            for (uid, name) in members {
+                payload.extend_from_slice(&uid.to_be_bytes());
+                put_str(&mut payload, name);
+            }
+        }
+        TcpMessage::MemberJoin { uid, nickname } => {
+            payload.extend_from_slice(&uid.to_be_bytes());
+            put_str(&mut payload, nickname);
+        }
+        TcpMessage::MemberLeave { uid } => payload.extend_from_slice(&uid.to_be_bytes()),
+        TcpMessage::Chat { uid, text } => {
+            payload.extend_from_slice(&uid.to_be_bytes());
+            put_str(&mut payload, text);
+        }
+        TcpMessage::Speaking { uid, on } => {
+            payload.extend_from_slice(&uid.to_be_bytes());
+            payload.push(if *on { 1 } else { 0 });
+        }
+        TcpMessage::LoginReject { reason } => put_str(&mut payload, reason),
+    }
+    let mut out = Vec::with_capacity(5 + payload.len());
+    out.extend_from_slice(&((payload.len() + 1) as u32).to_be_bytes());
+    out.push(msg.type_id());
+    out.extend_from_slice(&payload);
+    out
+}
+
+// ---------- 读 ----------
+
+enum FieldErr {
+    NotEnough,
+    BadUtf8,
+}
+
+struct Reader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn need(&self, n: usize) -> Result<(), FieldErr> {
+        if self.pos + n <= self.buf.len() {
+            Ok(())
+        } else {
+            Err(FieldErr::NotEnough)
+        }
+    }
+    fn u8(&mut self) -> Result<u8, FieldErr> {
+        self.need(1)?;
+        let v = self.buf[self.pos];
+        self.pos += 1;
+        Ok(v)
+    }
+    fn u16(&mut self) -> Result<u16, FieldErr> {
+        self.need(2)?;
+        let v = u16::from_be_bytes([self.buf[self.pos], self.buf[self.pos + 1]]);
+        self.pos += 2;
+        Ok(v)
+    }
+    fn u32(&mut self) -> Result<u32, FieldErr> {
+        self.need(4)?;
+        let v = u32::from_be_bytes(self.buf[self.pos..self.pos + 4].try_into().unwrap());
+        self.pos += 4;
+        Ok(v)
+    }
+    fn string(&mut self) -> Result<String, FieldErr> {
+        let len = self.u16()? as usize;
+        self.need(len)?;
+        let s = std::str::from_utf8(&self.buf[self.pos..self.pos + len])
+            .map_err(|_| FieldErr::BadUtf8)?
+            .to_string();
+        self.pos += len;
+        Ok(s)
+    }
+}
+
+/// 尝试从缓冲区头部解码一条消息。
+/// `Ok(None)` = 数据不足（等待更多字节）；`Ok(Some((msg, n)))` = 成功解码并消费 n 字节（支持粘包循环）；`Err` = 协议错误。
+pub fn try_decode(buf: &[u8]) -> Result<Option<(TcpMessage, usize)>, DecodeError> {
+    if buf.len() < 5 {
+        return Ok(None);
+    }
+    let len = u32::from_be_bytes(buf[0..4].try_into().unwrap()) as usize;
+    if len < 1 || len > 64 * 1024 {
+        return Err(DecodeError::UnknownType(0)); // 长度异常：视为协议错误
+    }
+    if buf.len() < 4 + len {
+        return Ok(None);
+    }
+    let type_id = buf[4];
+    let body = &buf[5..4 + len];
+    let mut r = Reader { buf: body, pos: 0 };
+
+    macro_rules! field {
+        ($e:expr) => {
+            match $e {
+                Ok(v) => v,
+                Err(FieldErr::NotEnough) => return Ok(None),
+                Err(FieldErr::BadUtf8) => return Err(DecodeError::BadUtf8),
+            }
+        };
+    }
+
+    let msg = match type_id {
+        1 => TcpMessage::Login { nickname: field!(r.string()) },
+        2 => {
+            let uid = field!(r.u16());
+            let token = field!(r.u32());
+            let count = field!(r.u16()) as usize;
+            let mut members = Vec::with_capacity(count.min(64));
+            for _ in 0..count {
+                let m_uid = field!(r.u16());
+                let name = field!(r.string());
+                members.push((m_uid, name));
+            }
+            TcpMessage::LoginOk { uid, token, members }
+        }
+        3 => {
+            let uid = field!(r.u16());
+            TcpMessage::MemberJoin { uid, nickname: field!(r.string()) }
+        }
+        4 => TcpMessage::MemberLeave { uid: field!(r.u16()) },
+        5 => {
+            let uid = field!(r.u16());
+            TcpMessage::Chat { uid, text: field!(r.string()) }
+        }
+        6 => {
+            let uid = field!(r.u16());
+            TcpMessage::Speaking { uid, on: field!(r.u8()) != 0 }
+        }
+        7 => TcpMessage::LoginReject { reason: field!(r.string()) },
+        other => return Err(DecodeError::UnknownType(other)),
+    };
+    Ok(Some((msg, 4 + len)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
