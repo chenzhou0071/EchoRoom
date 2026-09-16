@@ -1,0 +1,15 @@
+[package]
+name = "echoroom-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "echoroom-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "sim_clients"
+path = "src/bin/sim_clients.rs"
+
+[dependencies]
+echoroom-protocol = { path = "../protocol" }

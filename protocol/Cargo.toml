@@ -1,0 +1,6 @@
+[package]
+name = "echoroom-protocol"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
