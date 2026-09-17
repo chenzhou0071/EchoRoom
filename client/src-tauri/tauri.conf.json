@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "EchoRoom",
+  "productName": "Echo",
   "version": "0.1.0",
   "identifier": "com.echoroom.dev",
   "build": { "frontendDist": "../ui" },
@@ -9,7 +9,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "EchoRoom",
+        "title": "Echo",
         "width": 768,
         "height": 640,
         "minWidth": 768,

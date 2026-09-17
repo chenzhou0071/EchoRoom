@@ -180,3 +180,45 @@ body {
 ::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-thumb { background: #2f3542; border-radius: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- 首次启动设置面板 ---- */
+.setup-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 12, 16, .72);
+}
+.setup-mask.hidden { display: none; }
+.setup-panel {
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.setup-panel h2 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+.setup-panel input {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #15181f;
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+.setup-panel input:focus { border-color: var(--accent); }
+.setup-panel button {
+  padding: 8px;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}

@@ -17,6 +17,6 @@ fn main() {
     udp::spawn_cleanup_loop(room.clone());
 
     let listener = std::net::TcpListener::bind(("0.0.0.0", port)).expect("TCP bind 失败");
-    println!("echoroom-server listening on 0.0.0.0:{port} (tcp+udp)");
+    println!("Echo server listening on 0.0.0.0:{port} (tcp+udp)");
     tcp::serve(listener, room).expect("TCP 服务异常退出");
 }

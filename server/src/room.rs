@@ -91,6 +91,8 @@ impl Room {
         }
     }
 
+    /// 定向发送给指定成员（预留 API，当前主流程未用）
+    #[allow(dead_code)]
     pub fn send_to(&self, uid: u16, msg: &TcpMessage) {
         if let Some(m) = self.members.get(&uid) {
             let _ = m.tx.send(tcp::encode(msg));
@@ -139,6 +141,8 @@ impl Room {
             .collect()
     }
 
+    /// 按 uid 查昵称（预留 API，当前主流程未用）
+    #[allow(dead_code)]
     pub fn nickname(&self, uid: u16) -> Option<String> {
         self.members.get(&uid).map(|m| m.nickname.clone())
     }

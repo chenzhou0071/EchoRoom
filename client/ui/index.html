@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>EchoRoom</title>
+  <title>Echo</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header class="topbar">
-    <span class="title">EchoRoom</span>
+    <span class="title">Echo</span>
     <span class="status" id="conn-status">未连接</span>
   </header>
 
@@ -26,6 +26,15 @@
         <input id="chat-input" type="text" placeholder="连接后即可发言…" disabled />
         <button id="chat-send" disabled>发送</button>
       </footer>
+    </div>
+  </div>
+
+  <div class="setup-mask hidden" id="setup-mask">
+    <div class="setup-panel">
+      <h2>进入 Echo</h2>
+      <input id="setup-nickname" type="text" maxlength="24" placeholder="你的昵称" />
+      <input id="setup-server" type="text" maxlength="64" value="127.0.0.1:9000" placeholder="服务器地址 host:port" />
+      <button id="setup-connect">连接</button>
     </div>
   </div>
 
