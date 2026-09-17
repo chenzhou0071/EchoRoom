@@ -15,6 +15,7 @@ audiopus = "0.2.0"
 anyhow = "1.0.104"
 wasapi = "0.15"
 hound = "3.5.1"
+nnnoiseless = "0.5.2"
 
 [lib]
 name = "echoroom_client_lib"

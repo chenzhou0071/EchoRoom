@@ -52,7 +52,7 @@ impl MicCapture {
         client
             .initialize_client(
                 &format,
-                1_000_000, // 100ms 设备缓冲
+                200_000, // 20ms 设备缓冲（低延迟，自听/通话场景关键）
                 &Direction::Capture,
                 &ShareMode::Shared,
                 true,
@@ -86,9 +86,9 @@ impl MicCapture {
 
     /// 阻塞等待声卡事件并读出所有可用样本（追加到 out）；返回本次追加的样本数。
     pub fn pump(&self, out: &mut Vec<i16>) -> Result<usize> {
-        // 事件驱动等待新数据；100ms 超时视为"暂无数据"（正常路径），
-        // 下方 get_next_nbr_frames 兜底轮询可保证不依赖事件必达。
-        let _ = self._event.wait_for_event(100);
+        // 事件驱动等待新数据；10ms 超时兜底轮询——AUTOCONVERTPCM 下事件回调
+        // 可能不按预期触发，超时过长会把每次读取拖到超时点，引入明显延迟。
+        let _ = self._event.wait_for_event(10);
         let mut total = 0usize;
         loop {
             let frames = self
