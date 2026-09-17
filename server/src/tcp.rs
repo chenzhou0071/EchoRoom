@@ -40,6 +40,9 @@ fn handle_conn(mut stream: TcpStream, room: Arc<Mutex<Room>>) -> std::io::Result
         }
     };
     println!("[tcp] {nickname}(uid={}) 加入 {peer}", ok.uid);
+    // 离开守卫：此后无论何种路径结束（正常断开 / RST / 提前 return / panic），
+    // 都保证移除成员并广播 MemberLeave，不产生"僵尸连接"。
+    let guard = LeaveGuard { room: room.clone(), uid: ok.uid, nickname: nickname.clone() };
     // LoginOk（定向）+ MemberJoin（广播给其他人）
     {
         let login_ok = TcpMessage::LoginOk { uid: ok.uid, token: ok.token, members: ok.members.clone() };
@@ -84,19 +87,14 @@ fn handle_conn(mut stream: TcpStream, room: Arc<Mutex<Room>>) -> std::io::Result
                 }
             }
         }
-        let n = stream.read(&mut chunk)?;
-        if n == 0 {
-            break 'read;
+        match stream.read(&mut chunk) {
+            Ok(0) => break 'read,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(_) => break 'read, // 连接错误（如客户端 RST）：同样按断开处理
         }
-        buf.extend_from_slice(&chunk[..n]);
     }
-    // ---- 离开 ----
-    {
-        let mut room = room.lock().unwrap();
-        room.leave(ok.uid);
-        room.broadcast(None, &TcpMessage::MemberLeave { uid: ok.uid });
-    }
-    println!("[tcp] {nickname}(uid={}) 离开", ok.uid);
+    // ---- 离开：显式触发守卫（先于 writer.join，保证发送端通道关闭使写线程可结束）----
+    drop(guard);
     drop(stream);
     let _ = writer.join();
     Ok(())
@@ -125,6 +123,24 @@ fn read_first_login(stream: &mut TcpStream) -> std::io::Result<(String, Vec<u8>)
             Err(e) => {
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:?}")));
             }
+        }
+    }
+}
+
+/// 离开守卫：连接线程无论以何种方式结束（正常断开 / RST / 提前返回 / panic），
+/// 都保证从房间移除成员并广播 MemberLeave。
+struct LeaveGuard {
+    room: Arc<Mutex<Room>>,
+    uid: u16,
+    nickname: String,
+}
+
+impl Drop for LeaveGuard {
+    fn drop(&mut self) {
+        let mut room = self.room.lock().unwrap_or_else(|e| e.into_inner()); // 锁 poisoned 时也尽力清理
+        if room.leave(self.uid) {
+            room.broadcast(None, &TcpMessage::MemberLeave { uid: self.uid });
+            println!("[tcp] {}(uid={}) 离开", self.nickname, self.uid);
         }
     }
 }
