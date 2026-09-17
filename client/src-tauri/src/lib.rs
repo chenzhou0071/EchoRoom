@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod bridge;
 pub mod config;
 pub mod net;

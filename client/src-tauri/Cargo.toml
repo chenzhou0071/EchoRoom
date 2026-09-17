@@ -11,6 +11,8 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 echoroom-protocol = { path = "../../protocol" }
+audiopus = "0.2.0"
+anyhow = "1.0.104"
 
 [lib]
 name = "echoroom_client_lib"
