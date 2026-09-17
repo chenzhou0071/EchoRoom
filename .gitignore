@@ -10,3 +10,9 @@ client/src-tauri/target/
 .vscode/
 .idea/
 *.swp
+
+# tauri icon 源图副本（源图保存在 client/icons.png，此副本不入库）
+client/src-tauri/icons/source.png
+
+# 临时调试截图
+docs/superpowers/screenshot-*.png

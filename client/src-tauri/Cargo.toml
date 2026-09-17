@@ -1,0 +1,21 @@
+[package]
+name = "echoroom-client"
+version.workspace = true
+edition.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+echoroom-protocol = { path = "../../protocol" }
+
+[lib]
+name = "echoroom_client_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "echoroom-client"
+path = "src/main.rs"
