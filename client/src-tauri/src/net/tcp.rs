@@ -149,8 +149,9 @@ fn run_session(
                             my_token.store(token, Ordering::Relaxed);
                             bridge.emit_conn(ConnState::Connected);
                             // 服务器返回的列表不含自己：补上后整表发给 UI（UI 端无需特判自己）
+                            // 本地 muted 状态在 Task 5 接入 shared 后改为真实值
                             let mut all = members;
-                            all.push((uid, nickname.to_string()));
+                            all.push((uid, nickname.to_string(), false));
                             bridge.emit_member_list(all);
                             // 启动音频链路（麦克风/编码/播放/VAD 上报；失败不影响文字聊天）
                             crate::bridge::start_audio(&bridge.app, uid, token, addr.to_string(), tx.clone());

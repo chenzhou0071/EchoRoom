@@ -11,8 +11,8 @@ use echoroom_protocol::{tcp, ROOM_CAPACITY};
 pub struct JoinOk {
     pub uid: u16,
     pub token: u32,
-    /// 加入前已在房间的成员
-    pub members: Vec<(u16, String)>,
+    /// 加入前已在房间的成员：(uid, 昵称, 是否静音)
+    pub members: Vec<(u16, String, bool)>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -58,8 +58,11 @@ impl Room {
         if self.members.len() >= ROOM_CAPACITY {
             return Err(JoinErr::Full);
         }
-        let members: Vec<(u16, String)> =
-            self.members.values().map(|m| (m.uid, m.nickname.clone())).collect();
+        let members: Vec<(u16, String, bool)> = self
+            .members
+            .values()
+            .map(|m| (m.uid, m.nickname.clone(), false))
+            .collect();
         let uid = self.next_uid;
         self.next_uid = self.next_uid.wrapping_add(1).max(1);
         let token = self.next_token();
@@ -176,7 +179,7 @@ mod tests {
         assert!(ok1.members.is_empty());
         let (tx2, _r2) = mpsc::channel();
         let ok2 = room.join("B".into(), tx2).unwrap();
-        assert_eq!(ok2.members, vec![(ok1.uid, "A".to_string())]);
+        assert_eq!(ok2.members, vec![(ok1.uid, "A".to_string(), false)]);
         assert!(room.leave(ok1.uid));
         assert!(!room.leave(ok1.uid)); // 再删为 false
     }

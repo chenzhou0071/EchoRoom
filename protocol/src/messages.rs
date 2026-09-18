@@ -4,8 +4,8 @@
 pub enum TcpMessage {
     /// C→S：进入房间
     Login { nickname: String },
-    /// S→C：登录成功（uid、token、已有成员）
-    LoginOk { uid: u16, token: u32, members: Vec<(u16, String)> },
+    /// S→C：登录成功（uid、token、已有成员；成员 = (uid, 昵称, 是否静音)）
+    LoginOk { uid: u16, token: u32, members: Vec<(u16, String, bool)> },
     /// S→C：有成员加入
     MemberJoin { uid: u16, nickname: String },
     /// S→C：有成员离开
@@ -14,6 +14,10 @@ pub enum TcpMessage {
     Chat { uid: u16, text: String },
     /// C→S（uid 填 0）说话状态；S→C 广播
     Speaking { uid: u16, on: bool },
+    /// C→S（uid 填 0）静音状态；S→C 广播（Muted）
+    Mute { uid: u16, on: bool },
+    /// S→C 广播静音状态（含发送者本人）
+    Muted { uid: u16, on: bool },
     /// S→C：房间满等拒绝原因
     LoginReject { reason: String },
 }
@@ -28,6 +32,8 @@ impl TcpMessage {
             TcpMessage::Chat { .. } => 5,
             TcpMessage::Speaking { .. } => 6,
             TcpMessage::LoginReject { .. } => 7,
+            TcpMessage::Mute { .. } => 8,
+            TcpMessage::Muted { .. } => 9,
         }
     }
 }

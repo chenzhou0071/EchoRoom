@@ -24,9 +24,10 @@ pub fn encode(msg: &TcpMessage) -> Vec<u8> {
             payload.extend_from_slice(&uid.to_be_bytes());
             payload.extend_from_slice(&token.to_be_bytes());
             payload.extend_from_slice(&(members.len() as u16).to_be_bytes());
-            for (uid, name) in members {
+            for (uid, name, muted) in members {
                 payload.extend_from_slice(&uid.to_be_bytes());
                 put_str(&mut payload, name);
+                payload.push(if *muted { 1 } else { 0 });
             }
         }
         TcpMessage::MemberJoin { uid, nickname } => {
@@ -39,6 +40,10 @@ pub fn encode(msg: &TcpMessage) -> Vec<u8> {
             put_str(&mut payload, text);
         }
         TcpMessage::Speaking { uid, on } => {
+            payload.extend_from_slice(&uid.to_be_bytes());
+            payload.push(if *on { 1 } else { 0 });
+        }
+        TcpMessage::Mute { uid, on } | TcpMessage::Muted { uid, on } => {
             payload.extend_from_slice(&uid.to_be_bytes());
             payload.push(if *on { 1 } else { 0 });
         }
@@ -137,7 +142,8 @@ pub fn try_decode(buf: &[u8]) -> Result<Option<(TcpMessage, usize)>, DecodeError
             for _ in 0..count {
                 let m_uid = field!(r.u16());
                 let name = field!(r.string());
-                members.push((m_uid, name));
+                let muted = field!(r.u8()) != 0;
+                members.push((m_uid, name, muted));
             }
             TcpMessage::LoginOk { uid, token, members }
         }
@@ -155,6 +161,14 @@ pub fn try_decode(buf: &[u8]) -> Result<Option<(TcpMessage, usize)>, DecodeError
             TcpMessage::Speaking { uid, on: field!(r.u8()) != 0 }
         }
         7 => TcpMessage::LoginReject { reason: field!(r.string()) },
+        8 => {
+            let uid = field!(r.u16());
+            TcpMessage::Mute { uid, on: field!(r.u8()) != 0 }
+        }
+        9 => {
+            let uid = field!(r.u16());
+            TcpMessage::Muted { uid, on: field!(r.u8()) != 0 }
+        }
         other => return Err(DecodeError::UnknownType(other)),
     };
     Ok(Some((msg, 4 + len)))
@@ -169,11 +183,13 @@ mod tests {
     fn roundtrip_all_variants() {
         let samples = vec![
             TcpMessage::Login { nickname: "阿信".into() },
-            TcpMessage::LoginOk { uid: 3, token: 0xDEAD_BEEF, members: vec![(1, "小K".into()), (2, "你".into())] },
+            TcpMessage::LoginOk { uid: 3, token: 0xDEAD_BEEF, members: vec![(1, "小K".into(), false), (2, "你".into(), true)] },
             TcpMessage::MemberJoin { uid: 5, nickname: "新来的".into() },
             TcpMessage::MemberLeave { uid: 2 },
             TcpMessage::Chat { uid: 1, text: "晚上开黑吗".into() },
             TcpMessage::Speaking { uid: 4, on: true },
+            TcpMessage::Mute { uid: 0, on: true },
+            TcpMessage::Muted { uid: 4, on: true },
             TcpMessage::LoginReject { reason: "房间已满（6人）".into() },
         ];
         for msg in samples {
