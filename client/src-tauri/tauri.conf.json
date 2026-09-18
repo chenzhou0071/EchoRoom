@@ -14,7 +14,8 @@
         "height": 640,
         "minWidth": 768,
         "minHeight": 560,
-        "resizable": true
+        "resizable": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required"
       }
     ],
     "security": { "csp": null }
