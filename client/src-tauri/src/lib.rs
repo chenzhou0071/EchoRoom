@@ -11,6 +11,7 @@ pub fn run() {
         .manage(AppState {
             config: std::sync::Mutex::new(cfg),
             net: std::sync::Mutex::new(None),
+            audio: std::sync::Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             bridge::get_config,

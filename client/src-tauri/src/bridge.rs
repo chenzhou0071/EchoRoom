@@ -47,10 +47,11 @@ impl Bridge {
     }
 }
 
-/// 应用状态：配置 + 当前网络会话
+/// 应用状态：配置 + 当前网络会话 + 音频管线
 pub struct AppState {
     pub config: Mutex<Config>,
     pub net: Mutex<Option<NetHandle>>,
+    pub audio: Mutex<Option<crate::audio::session::AudioHandle>>,
 }
 
 // ---- UI 命令 ----
@@ -105,4 +106,17 @@ pub fn connect_with_app(app: &AppHandle, nickname: String, addr: String) {
         let _ = old.tx.send(NetCmd::Shutdown);
     }
     *slot = Some(handle);
+}
+
+/// 登录成功后：停旧音频管线，按新 uid/token/服务器地址启动（失败不影响文字聊天）。
+pub fn start_audio(app: &AppHandle, uid: u16, token: u32, server_addr: String) {
+    let state = app.state::<AppState>();
+    let mut slot = state.audio.lock().unwrap();
+    if let Some(old) = slot.take() {
+        old.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    match crate::audio::session::spawn_audio_pipeline(server_addr, uid, token) {
+        Ok(h) => *slot = Some(h),
+        Err(e) => eprintln!("[audio] 管线启动失败: {e:#}"),
+    }
 }

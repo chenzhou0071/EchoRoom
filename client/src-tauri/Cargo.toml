@@ -2,6 +2,7 @@
 name = "echoroom-client"
 version.workspace = true
 edition.workspace = true
+default-run = "echoroom-client"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

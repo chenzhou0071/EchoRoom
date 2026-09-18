@@ -1,5 +1,5 @@
 //! 录音工具：采集默认麦克风 N 秒并保存为 WAV（可用系统播放器回放）。
-//! 用法：cargo run --bin mic_record -- [秒数] [输出文件]（默认 5 秒 record.wav）
+//! 用法：cargo run --bin mic_record -- [秒数] [输出文件]（默认 5 秒，输出 target/record.wav）
 use std::time::{Duration, Instant};
 
 use echoroom_client_lib::audio::capture::MicCapture;
@@ -7,10 +7,17 @@ use echoroom_client_lib::audio::capture::MicCapture;
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let secs: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5.0);
-    let path = args
-        .get(2)
-        .cloned()
-        .unwrap_or_else(|| "record.wav".to_string());
+    let path = args.get(2).cloned().unwrap_or_else(|| {
+        // 默认输出到 workspace 的 target/ 目录（构建产物区），避免污染源码目录
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("workspace 根目录")
+            .join("target")
+            .join("record.wav")
+            .to_string_lossy()
+            .into_owned()
+    });
 
     let mic = MicCapture::open()?;
     let rate = mic.sample_rate();

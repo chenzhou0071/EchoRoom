@@ -59,7 +59,7 @@ fn run_loop(
     loop {
         bridge.emit_conn(if attempt == 0 { ConnState::Connecting } else { ConnState::Reconnecting });
         let result = match TcpStream::connect(&addr) {
-            Ok(mut stream) => run_session(&mut stream, &nickname, &bridge, &rx, &my_uid, &my_token),
+            Ok(mut stream) => run_session(&mut stream, &addr, &nickname, &bridge, &rx, &my_uid, &my_token),
             Err(e) => {
                 eprintln!("[net] 连接失败: {e}");
                 Err(e)
@@ -102,6 +102,7 @@ fn wait_or_shutdown(rx: &Receiver<NetCmd>, total: Duration) -> bool {
 
 fn run_session(
     stream: &mut TcpStream,
+    addr: &str,
     nickname: &str,
     bridge: &Bridge,
     rx: &Receiver<NetCmd>,
@@ -148,6 +149,8 @@ fn run_session(
                             let mut all = members;
                             all.push((uid, nickname.to_string()));
                             bridge.emit_member_list(all);
+                            // 启动音频链路（麦克风/编码/播放；失败不影响文字聊天）
+                            crate::bridge::start_audio(&bridge.app, uid, token, addr.to_string());
                         }
                         TcpMessage::LoginReject { reason } => {
                             bridge.emit_conn(ConnState::Rejected(reason));
