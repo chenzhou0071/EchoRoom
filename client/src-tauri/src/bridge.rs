@@ -36,6 +36,12 @@ impl Bridge {
     pub fn emit_speaking(&self, uid: u16, on: bool) {
         let _ = self.app.emit("speaking", serde_json::json!({ "uid": uid, "on": on }));
     }
+    pub fn emit_muted(&self, uid: u16, on: bool) {
+        let _ = self.app.emit("muted", serde_json::json!({ "uid": uid, "on": on }));
+    }
+    pub fn emit_self_uid(&self, uid: u16) {
+        let _ = self.app.emit("self_uid", uid);
+    }
     pub fn emit_conn(&self, state: ConnState) {
         let s = match state {
             ConnState::Connecting => "connecting".to_string(),
@@ -101,13 +107,69 @@ pub fn send_chat(state: State<AppState>, text: String) -> Result<(), String> {
 /// 用（新的）配置发起连接：先起新会话，再停掉旧会话（UI 事件无感切换）。
 pub fn connect_with_app(app: &AppHandle, nickname: String, addr: String) {
     let bridge = Bridge { app: app.clone() };
-    let handle = tcp::spawn(addr, nickname, bridge);
     let state = app.state::<AppState>();
+    let handle = tcp::spawn(addr, nickname, bridge, state.shared.clone());
     let mut slot = state.net.lock().unwrap();
     if let Some(old) = slot.take() {
         let _ = old.tx.send(NetCmd::Shutdown);
     }
     *slot = Some(handle);
+}
+
+/// 音量状态快照（emit "volume" 事件用）
+fn volume_json(state: &State<AppState>) -> serde_json::Value {
+    use std::sync::atomic::Ordering;
+    let self_gain = f32::from_bits(state.shared.self_gain.load(Ordering::Relaxed));
+    let muted = state.shared.self_muted.load(Ordering::Relaxed);
+    let peer_gains = state.shared.peer_gains.lock().unwrap().clone();
+    serde_json::json!({ "self_gain": self_gain, "muted": muted, "peer_gains": peer_gains })
+}
+
+/// 配置写盘走独立线程：滑块拖动会高频调用 set_*，避免写文件阻塞 IPC 主线程
+fn persist(state: &AppState) {
+    let cfg = state.config.lock().unwrap().clone();
+    std::thread::spawn(move || {
+        let _ = cfg.save(&default_config_path());
+    });
+}
+
+#[tauri::command]
+pub fn set_self_gain(app: AppHandle, state: State<AppState>, gain: f32) {
+    let g = gain.clamp(0.0, 2.0);
+    state
+        .shared
+        .self_gain
+        .store(g.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    state.config.lock().unwrap().self_gain = g;
+    persist(&state);
+    let _ = app.emit("volume", volume_json(&state));
+}
+
+#[tauri::command]
+pub fn set_muted(app: AppHandle, state: State<AppState>, on: bool) {
+    state
+        .shared
+        .self_muted
+        .store(on, std::sync::atomic::Ordering::Relaxed);
+    state.config.lock().unwrap().muted = on;
+    persist(&state);
+    if let Some(h) = state.net.lock().unwrap().as_ref() {
+        let _ = h.tx.send(NetCmd::SetMuted(on));
+    }
+    let _ = app.emit("volume", volume_json(&state));
+}
+
+#[tauri::command]
+pub fn set_peer_gain(app: AppHandle, state: State<AppState>, nickname: String, gain: f32) {
+    let g = gain.clamp(0.0, 2.0);
+    let snapshot = {
+        let mut map = state.shared.peer_gains.lock().unwrap();
+        map.insert(nickname, g);
+        map.clone()
+    };
+    state.config.lock().unwrap().peer_gains = snapshot;
+    persist(&state);
+    let _ = app.emit("volume", volume_json(&state));
 }
 
 /// 登录成功后：停旧音频管线，按新 uid/token/服务器地址启动（失败不影响文字聊天）。

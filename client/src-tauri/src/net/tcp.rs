@@ -15,6 +15,7 @@ use crate::bridge::{Bridge, ConnState};
 pub enum NetCmd {
     SendChat(String),
     SetSpeaking(bool),
+    SetMuted(bool),
     Shutdown,
 }
 
@@ -28,13 +29,20 @@ pub struct NetHandle {
 /// 重连退避（秒）：1 → 2 → 5 → 10（封顶）
 const BACKOFF_SECS: [u64; 4] = [1, 2, 5, 10];
 
-pub fn spawn(addr: String, nickname: String, bridge: Bridge) -> NetHandle {
+pub fn spawn(
+    addr: String,
+    nickname: String,
+    bridge: Bridge,
+    shared: crate::audio::session::SharedAudio,
+) -> NetHandle {
     let (tx, rx) = std::sync::mpsc::channel::<NetCmd>();
     let my_uid = Arc::new(AtomicU16::new(0));
     let my_token = Arc::new(AtomicU32::new(0));
     let (uid_c, tok_c) = (my_uid.clone(), my_token.clone());
     let tx_for_loop = tx.clone(); // 采集线程 VAD 的 SetSpeaking 命令经会话线程写 TCP
-    std::thread::spawn(move || run_loop(addr, nickname, bridge, rx, uid_c, tok_c, tx_for_loop));
+    std::thread::spawn(move || {
+        run_loop(addr, nickname, bridge, rx, uid_c, tok_c, tx_for_loop, shared)
+    });
     NetHandle { tx, my_uid, my_token }
 }
 
@@ -56,12 +64,13 @@ fn run_loop(
     my_uid: Arc<AtomicU16>,
     my_token: Arc<AtomicU32>,
     tx: Sender<NetCmd>,
+    shared: crate::audio::session::SharedAudio,
 ) {
     let mut attempt = 0usize;
     loop {
         bridge.emit_conn(if attempt == 0 { ConnState::Connecting } else { ConnState::Reconnecting });
         let result = match TcpStream::connect(&addr) {
-            Ok(mut stream) => run_session(&mut stream, &addr, &nickname, &bridge, &rx, &my_uid, &my_token, &tx),
+            Ok(mut stream) => run_session(&mut stream, &addr, &nickname, &bridge, &rx, &my_uid, &my_token, &tx, &shared),
             Err(e) => {
                 eprintln!("[net] 连接失败: {e}");
                 Err(e)
@@ -111,6 +120,7 @@ fn run_session(
     my_uid: &AtomicU16,
     my_token: &AtomicU32,
     tx: &Sender<NetCmd>,
+    shared: &crate::audio::session::SharedAudio,
 ) -> std::io::Result<SessionEnd> {
     stream.write_all(&tcp::encode(&TcpMessage::Login { nickname: nickname.to_string() }))?;
     stream.set_read_timeout(Some(Duration::from_millis(50)))?;
@@ -125,6 +135,9 @@ fn run_session(
                 }
                 NetCmd::SetSpeaking(on) => {
                     stream.write_all(&tcp::encode(&TcpMessage::Speaking { uid: 0, on }))?;
+                }
+                NetCmd::SetMuted(on) => {
+                    stream.write_all(&tcp::encode(&TcpMessage::Mute { uid: 0, on }))?;
                 }
                 NetCmd::Shutdown => return Ok(SessionEnd::Shutdown),
             }
@@ -148,11 +161,26 @@ fn run_session(
                             my_uid.store(uid, Ordering::Relaxed);
                             my_token.store(token, Ordering::Relaxed);
                             bridge.emit_conn(ConnState::Connected);
-                            // 服务器返回的列表不含自己：补上后整表发给 UI（UI 端无需特判自己）
-                            // 本地 muted 状态在 Task 5 接入 shared 后改为真实值
+                            // 重建 uid → 昵称映射（含自己；重连场景先清空）
+                            {
+                                let mut names = shared.uid_names.lock().unwrap();
+                                names.clear();
+                                for (u, n, _) in &members {
+                                    names.insert(*u, n.clone());
+                                }
+                                names.insert(uid, nickname.to_string());
+                            }
+                            bridge.emit_self_uid(uid);
+                            // 服务器返回的列表不含自己：补上后整表发给 UI；
+                            // 自己的 muted 取本地当前值（重连后保持界面与实际一致）
+                            let my_muted = shared.self_muted.load(Ordering::Relaxed);
                             let mut all = members;
-                            all.push((uid, nickname.to_string(), false));
+                            all.push((uid, nickname.to_string(), my_muted));
                             bridge.emit_member_list(all);
+                            // 重连后若本地处于静音，向新会话重新声明（否则服务器端 muted=false，别人看不到）
+                            if my_muted {
+                                stream.write_all(&tcp::encode(&TcpMessage::Mute { uid: 0, on: true }))?;
+                            }
                             // 启动音频链路（麦克风/编码/播放/VAD 上报；失败不影响文字聊天）
                             crate::bridge::start_audio(&bridge.app, uid, token, addr.to_string(), tx.clone());
                         }
@@ -161,11 +189,16 @@ fn run_session(
                             return Ok(SessionEnd::Rejected);
                         }
                         TcpMessage::MemberJoin { uid, nickname } => {
+                            shared.uid_names.lock().unwrap().insert(uid, nickname.clone());
                             bridge.emit_member_join(uid, nickname)
                         }
-                        TcpMessage::MemberLeave { uid } => bridge.emit_member_leave(uid),
+                        TcpMessage::MemberLeave { uid } => {
+                            shared.uid_names.lock().unwrap().remove(&uid);
+                            bridge.emit_member_leave(uid)
+                        }
                         TcpMessage::Chat { uid, text } => bridge.emit_chat(uid, text),
                         TcpMessage::Speaking { uid, on } => bridge.emit_speaking(uid, on),
+                        TcpMessage::Muted { uid, on } => bridge.emit_muted(uid, on),
                         _ => {}
                     }
                 }

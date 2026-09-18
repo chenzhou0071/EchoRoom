@@ -20,7 +20,10 @@ pub fn run() {
             bridge::get_config,
             bridge::set_config,
             bridge::connect,
-            bridge::send_chat
+            bridge::send_chat,
+            bridge::set_self_gain,
+            bridge::set_muted,
+            bridge::set_peer_gain
         ])
         // 连接时机交给 UI：前端注册好事件监听后再 invoke("connect")，
         // 避免"连接过快、事件先于监听器到达"导致首屏丢事件。
