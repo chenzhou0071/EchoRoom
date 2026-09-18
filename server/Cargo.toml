@@ -2,6 +2,7 @@
 name = "echoroom-server"
 version.workspace = true
 edition.workspace = true
+default-run = "echoroom-server"
 
 [[bin]]
 name = "echoroom-server"
