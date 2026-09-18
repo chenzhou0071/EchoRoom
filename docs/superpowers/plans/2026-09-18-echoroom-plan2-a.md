@@ -1575,8 +1575,15 @@ git commit -m "feat: member cards revamp with avatar, button rows and volume pan
 ```js
     muteBtn.innerHTML = volState.muted ? ICONS.micOff : ICONS.mic;
     muteBtn.addEventListener("click", () => {
-      // 不做本地乐观更新：Rust 侧 set_muted 会 emit "volume" 事件回来驱动重渲染
-      invoke("set_muted", { on: !volState.muted }).catch((e) => console.error("切换静音失败:", e));
+      // 不做本地乐观更新：Rust 侧会 emit "volume" 事件回来驱动重渲染
+      // 不变量：静音 ⟺ self_gain == 0。进入静音写 0；解除静音回默认 100%（先写增益再切静音）
+      if (volState.muted) {
+        invoke("set_self_gain", { gain: 1.0 }).catch((e) => console.error("恢复音量失败:", e));
+        invoke("set_muted", { on: false }).catch((e) => console.error("解除静音失败:", e));
+      } else {
+        invoke("set_self_gain", { gain: 0 }).catch((e) => console.error("音量归零失败:", e));
+        invoke("set_muted", { on: true }).catch((e) => console.error("静音失败:", e));
+      }
     });
     btns.appendChild(muteBtn);
 ```
@@ -1600,7 +1607,19 @@ volSlider.addEventListener("input", () => {
   if (!volTarget) return;
   const gain = Number(volSlider.value) / 100;
   if (volTarget.uid === myUid) {
-    invoke("set_self_gain", { gain }).catch((e) => console.error("设置自己音量失败:", e));
+    if (gain === 0) {
+      // 拖到 0% = 进入静音（与静音键同效：不发包 + 广播）；已静音则不重复发
+      if (!volState.muted) {
+        invoke("set_self_gain", { gain: 0 }).catch((e) => console.error("音量归零失败:", e));
+        invoke("set_muted", { on: true }).catch((e) => console.error("静音失败:", e));
+      }
+    } else {
+      // 实时调增益；若正在静音中（滑块从 0 拖出）则同时解除静音
+      invoke("set_self_gain", { gain }).catch((e) => console.error("设置自己音量失败:", e));
+      if (volState.muted) {
+        invoke("set_muted", { on: false }).catch((e) => console.error("解除静音失败:", e));
+      }
+    }
   } else {
     invoke("set_peer_gain", { nickname: volTarget.nickname, gain }).catch((e) =>
       console.error("设置他人音量失败:", e)
@@ -1609,7 +1628,7 @@ volSlider.addEventListener("input", () => {
 });
 ```
 
-回显闭环说明：命令落地后 Rust emit `volume` → T6 的监听仅在"值不同"时写滑块，拖动过程中不会被回写打架。
+回显闭环说明：命令落地后 Rust emit `volume` → T6 的监听仅在“值不同”时写滑块，拖动过程中不会被回写打架；静音联动始终维持 `muted ⟺ self_gain == 0` 不变量（先写增益后切静音），因此滑块/面板显示无需任何静音特判（静音中打开面板自然显示 0%）。
 
 - [ ] **Step 3: 双客户端手动验证**
 
@@ -1625,10 +1644,10 @@ $env:APPDATA = "E:\pro\EchoRoom\target\test-appdata"; Start-Process E:\pro\EchoR
 （如 exe 不存在先 `cargo build -p echoroom-client`。首次运行弹设置面板，填不同昵称，如 A=小K、B=阿信。）
 
 Expected:
-- A 点自己卡片静音按钮 → A 按钮变红激活；**B 侧 A 卡片名字条前出现红色静音图标**；A 对着麦说话，B 侧 A 的蓝框不亮且听不到声音；A 再点解除 → 图标消失、蓝框随说话恢复点亮
+- A 点自己卡片静音按钮 → A 按钮变红激活；**B 侧 A 卡片名字条前出现红色静音图标**；A 对着麦说话，B 侧 A 的蓝框不亮且听不到声音；A 再点解除 → **音量回 100%（面板滑块在 100%）**、图标消失、蓝框随说话恢复点亮
 - B 拖 **A（他人卡片）** 的音量滑块到 0% → B 听不到 A；拉到 200% → A 的声音明显更大；拖动过程中实时生效
-- A 拖 **自己卡片** 的音量到 0% → B 听不到 A；到 200% → B 听感明显变大
-- 关闭音量面板再打开 → 滑块停在已设值（`volState` 回显）；点空白处或再点音量按钮 → 面板关闭
+- A 拖 **自己卡片** 的音量到 0% → **等价于静音**：A 按钮变红、B 侧出现静音图标、B 听不到 A；把滑块从 0 拖回 50% → 解除静音（B 图标消失），B 听到的音量约为原来的 50%
+- 关闭音量面板再打开 → 滑块停在已设值（`volState` 回显）；静音中打开 → 显示 0%；点空白处或再点音量按钮 → 面板关闭
 
 - [ ] **Step 4: Commit**
 
@@ -1777,8 +1796,8 @@ Move-Item -Force "$env:APPDATA\com.echoroom.dev\config.json.bak" "$env:APPDATA\c
 环境同 T7 步骤 3（server + 实例 A + 实例 B）。逐项通过后勾选：
 
 - [ ] 1. B 拖低/拉高 A 的音量（0% / 200%）→ 对 A 的听感随之变小/变大，拖动实时生效
-- [ ] 2. A 点静音 → 对着麦说话 → 解除：B 侧 A 卡片出现红色静音图标、A 自己蓝框不亮、B 听不到 A；解除后蓝框恢复、声音回来；此时 C 新进 → C 的 LoginOk 记录同步即带 A 的静音图标
-- [ ] 3. A 拖自己音量（0% / 200%）→ B 对 A 的听感随之改变
+- [ ] 2. A 点静音（或拖自己滑块到 0%）→ B 侧 A 卡片出现红色静音图标、A 自己蓝框不亮、B 听不到 A；点静音键解除 → 音量回 100%（滑块跳 100）、蓝框恢复、声音回来；从静音把滑块拖出（如 50%）→ 解除且音量为 50%；此时 C 新进 → C 的 LoginOk 记录同步即带 A 的静音图标
+- [ ] 3. A 拖自己音量（50% / 200%）→ B 对 A 的听感随比例改变（拖到 0% 的静音场景见第 2 条）
 - [ ] 4. 双方分别重启客户端：音量（自己+他人按昵称）与静音设置保持；A 静音态重启重连后 B 侧仍显示静音图标（重连补发 Mute 生效）
 - [ ] 5. hover 投屏/摄像头按钮 → 显示"即将推出"，点击无效果、控制台无报错
 - [ ] 6. 音效：新成员加入 → 所有人（含新人自己）听到 in.mp3；成员退出 → 剩余方听到 out.mp3；server 重启触发重连 → 不播
