@@ -39,7 +39,9 @@ impl JitterBuffer {
 
     pub fn insert(&mut self, seq: u32, data: Vec<u8>) {
         if let Some(next) = self.next_seq {
-            if seq < next {
+            // 回绕安全比较（RFC 1982 风格）：差值转 i32 判“过去/未来”，
+            // 直接 `seq < next` 在 seq 从 u32::MAX 绕回 0 时会把新包误当旧包丢弃。
+            if (seq.wrapping_sub(next) as i32) < 0 {
                 return; // 过老：丢弃
             }
         }
@@ -156,5 +158,38 @@ mod tests {
         assert_eq!(jb.pop(), PopResult::Ready(Some(f(0))));
         jb.insert(0, f(99)); // 过老的重复帧
         assert_eq!(jb.pop(), PopResult::NotYet);
+    }
+
+    #[test]
+    fn wraparound_frames_not_dropped_as_old() {
+        let mut jb = JitterBuffer::new(2, 8);
+        // 时间轴推进到接近回绕点
+        jb.insert(u32::MAX - 2, f(1)); // 0xFFFFFFFD
+        jb.insert(u32::MAX - 1, f(2)); // 0xFFFFFFFE
+        assert_eq!(jb.pop(), PopResult::Ready(Some(f(1))));
+        assert_eq!(jb.pop(), PopResult::Ready(Some(f(2)))); // next = 0xFFFFFFFF
+        // 0xFFFFFFFF 丢失；网络继续发回绕后的 seq=0、1
+        jb.insert(0, f(3)); // ← 回绕后的新帧（直接比较下会被误判为过老）
+        jb.insert(1, f(4));
+        // 0xFFFFFFFF 等待 40ms 超时 → PLC
+        let t0 = std::time::Instant::now();
+        let mut plc = false;
+        while t0.elapsed() < std::time::Duration::from_millis(200) {
+            match jb.pop() {
+                PopResult::NotYet => std::thread::sleep(std::time::Duration::from_millis(5)),
+                PopResult::Ready(None) => {
+                    plc = true;
+                    break;
+                }
+                PopResult::Ready(Some(_)) => panic!("此处不应有数据"),
+            }
+        }
+        assert!(plc, "0xFFFFFFFF 缺帧应触发 PLC");
+        assert_eq!(
+            jb.pop(),
+            PopResult::Ready(Some(f(3))),
+            "回绕后的 seq=0 不应被当作旧包丢弃"
+        );
+        assert_eq!(jb.pop(), PopResult::Ready(Some(f(4))));
     }
 }
