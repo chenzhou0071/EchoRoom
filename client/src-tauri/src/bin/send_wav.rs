@@ -1,12 +1,14 @@
 //! 测试工具：把一段 WAV 录音用真实 Opus 链路按 20ms/帧实时发送到服务器，
-//! 模拟"一个正在说话的真实客户端"（供真人收听验证播放链路质量）。
-//! 用法：cargo run --bin send_wav -- <服务器addr> <wav路径> [循环遍数，默认 1]
+//! 模拟"一个正在说话的真实客户端"（供真人收听/看蓝框验证链路）。
+//! 说话状态（VAD）与真人客户端一致：能量双阈值检测，翻转时经 TCP 上报。
+//! 用法：cargo run --bin send_wav -- <服务器addr> <wav路径> [循环遍数，默认 1] [遍间停顿秒数，默认 0]
 //! WAV 要求 48kHz 单声道 16bit PCM（可直接用 mic_record 录制）。
 use std::io::{Read, Write};
 use std::net::{TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
 
 use echoroom_client_lib::audio::opus::OpusEnc;
+use echoroom_client_lib::audio::vad::SpeakingDetector;
 use echoroom_protocol::messages::{TcpMessage, UdpPacket};
 use echoroom_protocol::{tcp, udp, FRAME_SAMPLES, HEARTBEAT_INTERVAL_MS};
 
@@ -16,11 +18,12 @@ fn main() -> anyhow::Result<()> {
     let wav_path = match args.get(2) {
         Some(p) => p.clone(),
         None => {
-            println!("用法: cargo run --bin send_wav -- <服务器addr> <wav路径> [循环遍数，默认 1]");
+            println!("用法: cargo run --bin send_wav -- <服务器addr> <wav路径> [循环遍数，默认 1] [遍间停顿秒数，默认 0]");
             return Ok(());
         }
     };
     let loops: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let gap_secs: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
 
     let pcm = load_wav_48k_mono(&wav_path)?;
     let secs = pcm.len() as f64 / 48000.0;
@@ -60,12 +63,19 @@ fn main() -> anyhow::Result<()> {
     sock.connect(&addr)?;
     sock.send(&udp::encode(uid, 0, &UdpPacket::Register { token }))?;
 
-    // ---- 预编码全部帧 ----
+    // ---- 预编码全部帧（顺便算每帧 RMS 供 VAD 使用）----
     let mut enc = OpusEnc::new().map_err(|e| anyhow::anyhow!("编码器创建失败: {e}"))?;
     let mut frames: Vec<Vec<u8>> = Vec::new();
+    let mut rms_list: Vec<f64> = Vec::new();
     for chunk in pcm.chunks_exact(FRAME_SAMPLES) {
         match enc.encode(chunk) {
-            Ok(o) => frames.push(o),
+            Ok(o) => {
+                let rms = (chunk.iter().map(|&s| (s as f64).powi(2)).sum::<f64>()
+                    / chunk.len() as f64)
+                    .sqrt();
+                frames.push(o);
+                rms_list.push(rms);
+            }
             Err(e) => eprintln!("编码失败（跳过）: {e}"),
         }
     }
@@ -73,30 +83,53 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("没有可发送的完整帧");
     }
 
-    // ---- 实时发送（绝对时间锚定 20ms/帧，防时钟漂移）----
+    // ---- 实时发送（每遍独立绝对时间锚定 20ms/帧，防时钟漂移）----
+    let per_loop_secs = frames.len() as f64 * 0.02;
     println!(
-        "开始发送：{} 帧 × {loops} 遍（约 {:.1}s）",
+        "开始发送：{} 帧 × {loops} 遍（每遍约 {per_loop_secs:.1}s，遍间停顿 {gap_secs}s）",
         frames.len(),
-        frames.len() as f64 * 0.02 * loops as f64
     );
-    let t0 = Instant::now();
     let mut sent: u64 = 0;
     let mut seq: u32 = 0;
     let mut last_hb = Instant::now();
+    // VAD：与真人客户端同参数（进入 50 / 退出 25 / 保持 400ms），翻转时上报
+    let mut detector = SpeakingDetector::new(50.0, 25.0, Duration::from_millis(400));
     for _ in 0..loops {
-        for f in &frames {
-            let target = t0 + Duration::from_millis(sent * 20);
+        let t0 = Instant::now();
+        for (i, f) in frames.iter().enumerate() {
+            let target = t0 + Duration::from_millis(i as u64 * 20);
             let now = Instant::now();
             if target > now {
                 std::thread::sleep(target - now);
             }
-            let pkt = udp::encode(uid, seq, &UdpPacket::Voice { opus: f.clone() });
-            sock.send(&pkt)?;
-            seq = seq.wrapping_add(1);
-            sent += 1;
+            // 说话状态：帧能量 → 状态翻转即上报（uid=0 由服务器填真实 uid 后广播）
+            if let Some(on) = detector.update(rms_list[i], Instant::now()) {
+                stream.write_all(&tcp::encode(&TcpMessage::Speaking { uid: 0, on }))?;
+            }
+            // 静音不发包：与真实客户端一致，说话状态（含 400ms 保持）期间才发送
+            if detector.speaking() {
+                let pkt = udp::encode(uid, seq, &UdpPacket::Voice { opus: f.clone() });
+                sock.send(&pkt)?;
+                seq = seq.wrapping_add(1);
+                sent += 1;
+            }
             if last_hb.elapsed().as_millis() >= HEARTBEAT_INTERVAL_MS as u128 {
                 let _ = sock.send(&udp::encode(uid, 0, &UdpPacket::Heartbeat));
                 last_hb = Instant::now();
+            }
+        }
+        // 遍间停顿：模拟静音输入（喂 0 能量让 VAD 自然翻 off），期间维持心跳
+        if gap_secs > 0 {
+            let t_end = Instant::now() + Duration::from_secs(gap_secs);
+            while Instant::now() < t_end {
+                std::thread::sleep(Duration::from_millis(20));
+                if let Some(on) = detector.update(0.0, Instant::now()) {
+                    stream.write_all(&tcp::encode(&TcpMessage::Speaking { uid: 0, on }))?;
+                }
+                if last_hb.elapsed().as_millis() >= HEARTBEAT_INTERVAL_MS as u128 {
+                    let _ = sock.send(&udp::encode(uid, 0, &UdpPacket::Heartbeat));
+                    last_hb = Instant::now();
+                }
             }
         }
     }

@@ -12,6 +12,8 @@ use crate::audio::denoise::Denoiser;
 use crate::audio::jitter::{JitterBuffer, PopResult};
 use crate::audio::mixer::MixAccumulator;
 use crate::audio::opus::OpusDec;
+use crate::audio::vad::SpeakingDetector;
+use crate::net::tcp::NetCmd;
 
 /// 音频管线句柄：`stop` 置位后所有线程退出（Drop 不自动停止，由上层显式管理）。
 pub struct AudioHandle {
@@ -48,7 +50,7 @@ impl Sender {
 /// 启动完整音频管线（登录成功后调用；失败不影响文字聊天）。
 ///
 /// 线程：
-/// 1. 采集线程：MicCapture（960 块）→ Denoiser 降噪 → tx_pcm
+/// 1. 采集线程：MicCapture（960 块）→ Denoiser 降噪 → VAD 说话状态上报 → tx_pcm
 /// 2. UDP 发送/接收线程（net::udp）
 /// 3. 播放线程：drain 语音 → 每发送者抖动缓冲 → 解码/PLC → 混音 → 声卡回调
 /// 4. 监视线程：stop 置位后关闭播放器
@@ -56,11 +58,12 @@ pub fn spawn_audio_pipeline(
     server_addr: String,
     uid: u16,
     token: u32,
+    tcp_tx: std::sync::mpsc::Sender<NetCmd>,
 ) -> anyhow::Result<AudioHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let (tx_pcm, rx_voice) = crate::net::udp::spawn_udp_voice(server_addr, uid, token, stop.clone())?;
 
-    // 采集线程：MicCapture → 累积 960 → 降噪 → tx_pcm
+    // 采集线程：MicCapture → 累积 960 → 降噪 → VAD → tx_pcm
     {
         let stop = stop.clone();
         std::thread::spawn(move || {
@@ -73,6 +76,8 @@ pub fn spawn_audio_pipeline(
                 }
             };
             let mut denoiser = Denoiser::new();
+            // 阈值实测自降噪后信号（底噪残留 ≈ 17、语音 ≥ 200）：进入 50 / 退出 25
+            let mut detector = SpeakingDetector::new(50.0, 25.0, Duration::from_millis(400));
             let mut pending: Vec<i16> = Vec::with_capacity(1920);
             while !stop.load(Ordering::Relaxed) {
                 if let Err(e) = mic.pump(&mut pending) {
@@ -82,7 +87,17 @@ pub fn spawn_audio_pipeline(
                 while pending.len() >= FRAME_SAMPLES {
                     let mut block: Vec<i16> = pending.drain(..FRAME_SAMPLES).collect();
                     denoiser.process(&mut block); // 960 = 480×2 帧，整倍数合法
-                    let _ = tx_pcm.try_send(block); // 队列满：丢块（接收端按缺帧 PLC）
+                    // VAD：能量双阈值（进入 50 / 退出 25 / 保持 400ms），翻转时上报
+                    let rms = (block.iter().map(|&s| (s as f64).powi(2)).sum::<f64>()
+                        / block.len() as f64)
+                        .sqrt();
+                    if let Some(on) = detector.update(rms, std::time::Instant::now()) {
+                        let _ = tcp_tx.send(NetCmd::SetSpeaking(on)); // 无界队列：不阻塞
+                    }
+                    // 静音不发包：仅说话状态（含 400ms 保持）期间发送；接收端 PLC 超时静默兜底
+                    if detector.speaking() {
+                        let _ = tx_pcm.try_send(block); // 队列满：丢块（接收端按缺帧 PLC）
+                    }
                 }
             }
         });

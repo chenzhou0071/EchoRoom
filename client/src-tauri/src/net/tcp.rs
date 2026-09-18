@@ -33,7 +33,8 @@ pub fn spawn(addr: String, nickname: String, bridge: Bridge) -> NetHandle {
     let my_uid = Arc::new(AtomicU16::new(0));
     let my_token = Arc::new(AtomicU32::new(0));
     let (uid_c, tok_c) = (my_uid.clone(), my_token.clone());
-    std::thread::spawn(move || run_loop(addr, nickname, bridge, rx, uid_c, tok_c));
+    let tx_for_loop = tx.clone(); // 采集线程 VAD 的 SetSpeaking 命令经会话线程写 TCP
+    std::thread::spawn(move || run_loop(addr, nickname, bridge, rx, uid_c, tok_c, tx_for_loop));
     NetHandle { tx, my_uid, my_token }
 }
 
@@ -54,12 +55,13 @@ fn run_loop(
     rx: Receiver<NetCmd>,
     my_uid: Arc<AtomicU16>,
     my_token: Arc<AtomicU32>,
+    tx: Sender<NetCmd>,
 ) {
     let mut attempt = 0usize;
     loop {
         bridge.emit_conn(if attempt == 0 { ConnState::Connecting } else { ConnState::Reconnecting });
         let result = match TcpStream::connect(&addr) {
-            Ok(mut stream) => run_session(&mut stream, &addr, &nickname, &bridge, &rx, &my_uid, &my_token),
+            Ok(mut stream) => run_session(&mut stream, &addr, &nickname, &bridge, &rx, &my_uid, &my_token, &tx),
             Err(e) => {
                 eprintln!("[net] 连接失败: {e}");
                 Err(e)
@@ -108,6 +110,7 @@ fn run_session(
     rx: &Receiver<NetCmd>,
     my_uid: &AtomicU16,
     my_token: &AtomicU32,
+    tx: &Sender<NetCmd>,
 ) -> std::io::Result<SessionEnd> {
     stream.write_all(&tcp::encode(&TcpMessage::Login { nickname: nickname.to_string() }))?;
     stream.set_read_timeout(Some(Duration::from_millis(50)))?;
@@ -149,8 +152,8 @@ fn run_session(
                             let mut all = members;
                             all.push((uid, nickname.to_string()));
                             bridge.emit_member_list(all);
-                            // 启动音频链路（麦克风/编码/播放；失败不影响文字聊天）
-                            crate::bridge::start_audio(&bridge.app, uid, token, addr.to_string());
+                            // 启动音频链路（麦克风/编码/播放/VAD 上报；失败不影响文字聊天）
+                            crate::bridge::start_audio(&bridge.app, uid, token, addr.to_string(), tx.clone());
                         }
                         TcpMessage::LoginReject { reason } => {
                             bridge.emit_conn(ConnState::Rejected(reason));

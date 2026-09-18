@@ -99,4 +99,30 @@ mod tests {
             "噪声能量应被衰减: in={rms_in:.1} out={rms_out:.1}"
         );
     }
+
+    #[test]
+    fn silence_and_floor_levels_probe() {
+        // VAD 阈值定值探针：观察"静音/真实底噪"经 RNNoise 后的输出能量
+        // （cargo test silence_and_floor -- --nocapture 查看）
+        let mut d = Denoiser::new();
+        let mut zero = vec![0i16; 960 * 30];
+        d.process(&mut zero);
+        let peak = zero.iter().map(|s| s.abs()).max().unwrap();
+        println!("[probe] 全 0 输入 → 输出 rms={:.2} peak={peak}", rms(&zero));
+        assert!(rms(&zero) < 0.001, "纯静音输入应输出全 0");
+
+        // 低幅白噪声：模拟真实麦克风底噪（rms ≈ 24，与录得的底噪 < 40 同量级）
+        let mut d2 = Denoiser::new();
+        let mut seed = 999u32;
+        let mut noise: Vec<i16> = (0..960 * 30)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((seed >> 16) as i16) / 800
+            })
+            .collect();
+        let r_in = rms(&noise);
+        d2.process(&mut noise);
+        println!("[probe] 底噪输入 rms={r_in:.1} → 输出 rms={:.2}", rms(&noise));
+        assert!(rms(&noise) < r_in, "底噪能量应被部分衰减");
+    }
 }

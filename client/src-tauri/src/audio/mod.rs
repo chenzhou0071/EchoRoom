@@ -6,3 +6,4 @@ pub mod mixer;
 pub mod opus;
 pub mod playback;
 pub mod session;
+pub mod vad;

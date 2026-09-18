@@ -75,7 +75,8 @@ fn handle_conn(mut stream: TcpStream, room: Arc<Mutex<Room>>) -> std::io::Result
                         }
                         TcpMessage::Speaking { on, .. } => {
                             let room = room.lock().unwrap();
-                            room.broadcast(Some(ok.uid), &TcpMessage::Speaking { uid: ok.uid, on });
+                            // 广播回所有人（含自己）：与 Chat 同模式，说话者自己的卡片也要亮
+                            room.broadcast(None, &TcpMessage::Speaking { uid: ok.uid, on });
                         }
                         _ => {}
                     }
