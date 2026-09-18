@@ -78,6 +78,12 @@ fn handle_conn(mut stream: TcpStream, room: Arc<Mutex<Room>>) -> std::io::Result
                             // 广播回所有人（含自己）：与 Chat 同模式，说话者自己的卡片也要亮
                             room.broadcast(None, &TcpMessage::Speaking { uid: ok.uid, on });
                         }
+                        TcpMessage::Mute { on, .. } => {
+                            let mut room = room.lock().unwrap();
+                            room.set_muted(ok.uid, on);
+                            // 广播回所有人（含自己）：与 Chat/Speaking 同模式，卡片图标统一由广播驱动
+                            room.broadcast(None, &TcpMessage::Muted { uid: ok.uid, on });
+                        }
                         _ => {}
                     }
                 }

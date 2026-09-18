@@ -24,6 +24,7 @@ pub struct Member {
     pub uid: u16,
     pub nickname: String,
     pub token: u32,
+    pub muted: bool,
     pub tx: Sender<Vec<u8>>, // TCP 发送队列（预编码字节）
     pub udp_addr: Option<SocketAddr>,
     pub last_seen: Instant,
@@ -61,7 +62,7 @@ impl Room {
         let members: Vec<(u16, String, bool)> = self
             .members
             .values()
-            .map(|m| (m.uid, m.nickname.clone(), false))
+            .map(|m| (m.uid, m.nickname.clone(), m.muted))
             .collect();
         let uid = self.next_uid;
         self.next_uid = self.next_uid.wrapping_add(1).max(1);
@@ -72,6 +73,7 @@ impl Room {
                 uid,
                 nickname,
                 token,
+                muted: false,
                 tx,
                 udp_addr: None,
                 last_seen: Instant::now(),
@@ -104,6 +106,16 @@ impl Room {
 
     pub fn validate_token(&self, uid: u16, token: u32) -> bool {
         self.members.get(&uid).map(|m| m.token == token).unwrap_or(false)
+    }
+
+    /// 更新成员静音状态；成员不存在返回 false
+    pub fn set_muted(&mut self, uid: u16, on: bool) -> bool {
+        if let Some(m) = self.members.get_mut(&uid) {
+            m.muted = on;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn set_udp(&mut self, uid: u16, addr: SocketAddr) {
@@ -228,5 +240,18 @@ mod tests {
         let (msg, _) = echoroom_protocol::tcp::try_decode(&bytes).unwrap().unwrap();
         assert_eq!(msg, TcpMessage::LoginReject { reason: "测试".into() });
         assert!(rx2.try_recv().is_err(), "B 不应收到定向消息");
+    }
+
+    #[test]
+    fn set_muted_updates_member_and_join_reports_it() {
+        let mut room = Room::new();
+        let (tx1, _r1) = mpsc::channel();
+        let a = room.join("A".into(), tx1).unwrap();
+        assert!(room.set_muted(a.uid, true));
+        assert!(!room.set_muted(999, true)); // 不存在的成员
+        let (tx2, _r2) = mpsc::channel();
+        let b = room.join("B".into(), tx2).unwrap();
+        // 后加入者应看到 A 处于静音
+        assert_eq!(b.members, vec![(a.uid, "A".to_string(), true)]);
     }
 }
