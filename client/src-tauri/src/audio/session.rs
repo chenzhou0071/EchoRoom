@@ -1,7 +1,7 @@
 //! 音频管线编排：采集（含 RNNoise 降噪）→ Opus → UDP 发送；
 //! UDP 接收 → 抖动缓冲 → Opus 解码（缺帧 PLC）→ 混音软限幅 → WASAPI 播放。
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +14,51 @@ use crate::audio::mixer::MixAccumulator;
 use crate::audio::opus::OpusDec;
 use crate::audio::vad::SpeakingDetector;
 use crate::net::tcp::NetCmd;
+
+/// 音量/静音共享态：bridge（写）+ 网络线程（写 uid_names）+ 音频线程（读）三方共享。
+#[derive(Clone)]
+pub struct SharedAudio {
+    /// 自己的采集增益（f32 bits 存于 AtomicU32）
+    pub self_gain: Arc<AtomicU32>,
+    /// 自己的静音状态
+    pub self_muted: Arc<AtomicBool>,
+    /// 对他人的播放增益（按昵称）
+    pub peer_gains: Arc<std::sync::Mutex<HashMap<String, f32>>>,
+    /// uid → 昵称（网络线程维护；播放端按 uid 查增益）
+    pub uid_names: Arc<std::sync::Mutex<HashMap<u16, String>>>,
+}
+
+impl SharedAudio {
+    pub fn new(self_gain: f32, muted: bool, peer_gains: HashMap<String, f32>) -> Self {
+        SharedAudio {
+            self_gain: Arc::new(AtomicU32::new(self_gain.to_bits())),
+            self_muted: Arc::new(AtomicBool::new(muted)),
+            peer_gains: Arc::new(std::sync::Mutex::new(peer_gains)),
+            uid_names: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+/// 本块要对外发送的 speaking 上报决策（None = 不发送）。
+/// 语义：进入静音瞬间强制上报“停止说话”；静音期间抑制“开始说话”；
+/// 解除静音瞬间补报 VAD 当前真实状态（静音期间 VAD 照跑，状态可能已翻转）。
+fn speaking_report(
+    flip: Option<bool>,
+    muted_now: bool,
+    was_muted: bool,
+    speaking_now: bool,
+) -> Option<bool> {
+    if !was_muted && muted_now {
+        return Some(false);
+    }
+    if was_muted && !muted_now {
+        return Some(speaking_now);
+    }
+    match flip {
+        Some(on) if !muted_now || !on => Some(on),
+        _ => None,
+    }
+}
 
 /// 音频管线句柄：`stop` 置位后所有线程退出（Drop 不自动停止，由上层显式管理）。
 pub struct AudioHandle {
@@ -59,13 +104,16 @@ pub fn spawn_audio_pipeline(
     uid: u16,
     token: u32,
     tcp_tx: std::sync::mpsc::Sender<NetCmd>,
+    shared: SharedAudio,
 ) -> anyhow::Result<AudioHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let (tx_pcm, rx_voice) = crate::net::udp::spawn_udp_voice(server_addr, uid, token, stop.clone())?;
 
-    // 采集线程：MicCapture → 累积 960 → 降噪 → VAD → tx_pcm
+    // 采集线程：MicCapture → 累积 960 → 降噪 →（增益）→ VAD → tx_pcm
     {
         let stop = stop.clone();
+        let self_gain = shared.self_gain.clone();
+        let self_muted = shared.self_muted.clone();
         std::thread::spawn(move || {
             let mic = match MicCapture::open() {
                 Ok(m) => m,
@@ -79,6 +127,7 @@ pub fn spawn_audio_pipeline(
             // 阈值实测自降噪后信号（底噪残留 ≈ 17、语音 ≥ 200）：进入 50 / 退出 25
             let mut detector = SpeakingDetector::new(50.0, 25.0, Duration::from_millis(400));
             let mut pending: Vec<i16> = Vec::with_capacity(1920);
+            let mut was_muted = false;
             while !stop.load(Ordering::Relaxed) {
                 if let Err(e) = mic.pump(&mut pending) {
                     eprintln!("[audio] 采集错误: {e:#}");
@@ -87,15 +136,25 @@ pub fn spawn_audio_pipeline(
                 while pending.len() >= FRAME_SAMPLES {
                     let mut block: Vec<i16> = pending.drain(..FRAME_SAMPLES).collect();
                     denoiser.process(&mut block); // 960 = 480×2 帧，整倍数合法
-                    // VAD：能量双阈值（进入 50 / 退出 25 / 保持 400ms），翻转时上报
+                    // 采集增益：denoise 后、VAD 前（增益调大 → VAD 更灵敏，符合直觉）
+                    let g = f32::from_bits(self_gain.load(Ordering::Relaxed));
+                    if (g - 1.0).abs() > 1e-6 {
+                        for s in block.iter_mut() {
+                            *s = ((*s as f32) * g).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                        }
+                    }
                     let rms = (block.iter().map(|&s| (s as f64).powi(2)).sum::<f64>()
                         / block.len() as f64)
                         .sqrt();
-                    if let Some(on) = detector.update(rms, std::time::Instant::now()) {
+                    // VAD 静音期间照跑：状态机连续，解除静音后状态立即正确
+                    let flip = detector.update(rms, std::time::Instant::now());
+                    let now_muted = self_muted.load(Ordering::Relaxed);
+                    if let Some(on) = speaking_report(flip, now_muted, was_muted, detector.speaking()) {
                         let _ = tcp_tx.send(NetCmd::SetSpeaking(on)); // 无界队列：不阻塞
                     }
-                    // 静音不发包：仅说话状态（含 400ms 保持）期间发送；接收端 PLC 超时静默兜底
-                    if detector.speaking() {
+                    was_muted = now_muted;
+                    // 静音不发包：仅说话状态（含 400ms 保持）且未静音期间发送；接收端 PLC 超时静默兜底
+                    if !now_muted && detector.speaking() {
                         let _ = tx_pcm.try_send(block); // 队列满：丢块（接收端按缺帧 PLC）
                     }
                 }
@@ -108,6 +167,8 @@ pub fn spawn_audio_pipeline(
     let mut seen: HashSet<u16> = HashSet::new();
     let mut acc = MixAccumulator::new(FRAME_SAMPLES);
     let mut scratch = vec![0i16; FRAME_SAMPLES];
+    let peer_gains = shared.peer_gains.clone();
+    let uid_names = shared.uid_names.clone();
     let player = crate::audio::playback::spawn_player(move |out| {
         // 收流：每发送者独立抖动缓冲
         while let Ok((uid, seq, opus)) = rx_voice.try_recv() {
@@ -121,8 +182,21 @@ pub fn spawn_audio_pipeline(
         let mut filled = 0usize;
         while filled < out.len() {
             let want = (out.len() - filled).min(FRAME_SAMPLES);
+            // 每段快照一次 uid → gain（避免逐路重复查昵称）；无自定义增益时为空表走默认 1.0
+            let gain_snapshot: HashMap<u16, f32> = {
+                let names = uid_names.lock().unwrap();
+                let gains = peer_gains.lock().unwrap();
+                if gains.is_empty() {
+                    HashMap::new()
+                } else {
+                    names
+                        .iter()
+                        .map(|(u, n)| (*u, gains.get(n).copied().unwrap_or(1.0)))
+                        .collect()
+                }
+            };
             acc.clear();
-            for s in jbs.values_mut() {
+            for (uid, s) in jbs.iter_mut() {
                 let Some(dec) = s.dec.as_mut() else { continue };
                 let mut got = 0usize;
                 while got < want {
@@ -159,7 +233,8 @@ pub fn spawn_audio_pipeline(
                         }
                     }
                     let n = (want - got).min(s.pcm.len() - s.pos);
-                    acc.add(&s.pcm[s.pos..s.pos + n]);
+                    let g = gain_snapshot.get(uid).copied().unwrap_or(1.0);
+                    acc.add_scaled(&s.pcm[s.pos..s.pos + n], g);
                     s.pos += n;
                     got += n;
                 }
@@ -182,4 +257,24 @@ pub fn spawn_audio_pipeline(
     }
 
     Ok(AudioHandle { stop })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn speaking_report_mutes_and_realigns() {
+        // 正常翻转透传
+        assert_eq!(speaking_report(Some(true), false, false, true), Some(true));
+        assert_eq!(speaking_report(Some(false), false, false, false), Some(false));
+        // 进入静音瞬间：强制上报停止说话（清别人卡片蓝框）
+        assert_eq!(speaking_report(None, true, false, true), Some(false));
+        // 静音期间：翻入说话被抑制；翻出静音可上报（无害）
+        assert_eq!(speaking_report(Some(true), true, true, true), None);
+        assert_eq!(speaking_report(Some(false), true, true, false), Some(false));
+        // 解除静音：补报 VAD 当前状态（可能在静音期间已翻转为说话）
+        assert_eq!(speaking_report(None, false, true, true), Some(true));
+        assert_eq!(speaking_report(None, false, true, false), Some(false));
+    }
 }

@@ -21,6 +21,19 @@ impl MixAccumulator {
         }
     }
 
+    /// 增益后累加（gain 通常 0.0–2.0；越界样本 clamp 到 i16 域后再进 i32 累加）。
+    /// gain ≈ 1.0 走原路径，避免无意义的浮点乘。
+    pub fn add_scaled(&mut self, pcm: &[i16], gain: f32) {
+        if (gain - 1.0).abs() < 1e-6 {
+            self.add(pcm);
+            return;
+        }
+        for (a, &s) in self.acc.iter_mut().zip(pcm.iter()) {
+            let v = (s as f32 * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i32;
+            *a += v;
+        }
+    }
+
     pub fn clear(&mut self) {
         self.acc.iter_mut().for_each(|a| *a = 0);
     }
@@ -111,6 +124,30 @@ mod tests {
     fn empty_mix_is_silence() {
         let acc = MixAccumulator::new(N);
         let mut out = vec![123i16; N];
+        acc.finalize(&mut out);
+        assert!(out.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn add_scaled_applies_gain() {
+        let sig = ramp(10000);
+        let mut acc = MixAccumulator::new(N);
+        acc.add_scaled(&sig, 0.5);
+        let mut out = vec![0i16; N];
+        acc.finalize(&mut out);
+        // 半幅信号在近似线性区：约为输入一半（小信号误差 < 100）
+        for (o, s) in out.iter().zip(sig.iter()) {
+            let expect = *s as f32 * 0.5;
+            assert!((*o as f32 - expect).abs() < 100.0, "o={o} s={s}");
+        }
+    }
+
+    #[test]
+    fn add_scaled_zero_is_silence() {
+        let sig = ramp(20000);
+        let mut acc = MixAccumulator::new(N);
+        acc.add_scaled(&sig, 0.0);
+        let mut out = vec![1i16; N];
         acc.finalize(&mut out);
         assert!(out.iter().all(|&v| v == 0));
     }

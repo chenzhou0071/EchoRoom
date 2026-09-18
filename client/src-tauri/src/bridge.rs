@@ -52,6 +52,8 @@ pub struct AppState {
     pub config: Mutex<Config>,
     pub net: Mutex<Option<NetHandle>>,
     pub audio: Mutex<Option<crate::audio::session::AudioHandle>>,
+    /// 音量/静音共享态（音频线程、网络线程共享读写）
+    pub shared: crate::audio::session::SharedAudio,
 }
 
 // ---- UI 命令 ----
@@ -122,7 +124,13 @@ pub fn start_audio(
     if let Some(old) = slot.take() {
         old.stop.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    match crate::audio::session::spawn_audio_pipeline(server_addr, uid, token, tcp_tx) {
+    match crate::audio::session::spawn_audio_pipeline(
+        server_addr,
+        uid,
+        token,
+        tcp_tx,
+        state.shared.clone(),
+    ) {
         Ok(h) => *slot = Some(h),
         Err(e) => eprintln!("[audio] 管线启动失败: {e:#}"),
     }

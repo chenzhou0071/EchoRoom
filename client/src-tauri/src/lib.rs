@@ -7,11 +7,14 @@ use bridge::AppState;
 
 pub fn run() {
     let cfg = config::Config::load(&config::default_config_path());
+    let shared =
+        audio::session::SharedAudio::new(cfg.self_gain, cfg.muted, cfg.peer_gains.clone());
     tauri::Builder::default()
         .manage(AppState {
             config: std::sync::Mutex::new(cfg),
             net: std::sync::Mutex::new(None),
             audio: std::sync::Mutex::new(None),
+            shared,
         })
         .invoke_handler(tauri::generate_handler![
             bridge::get_config,
