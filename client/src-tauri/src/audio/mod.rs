@@ -2,5 +2,6 @@
 pub mod capture;
 pub mod denoise;
 pub mod jitter;
+pub mod mixer;
 pub mod opus;
 pub mod playback;
