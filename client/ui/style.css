@@ -107,6 +107,7 @@ body {
   overflow-y: auto;
   height: 250px; /* 恰一行：12 + 卡片 230 + 8 */
   flex-shrink: 0; /* 成员行固定高度，不被压缩 */
+  position: relative; /* #view 观看视图覆盖层的定位基准 */
 }
 .member {
   width: var(--tile);
@@ -298,4 +299,96 @@ body {
   color: #fff;
   font-size: 13px;
   cursor: pointer;
+}
+
+/* ---- B：观看视图（覆盖 #members 区域；观看与自预览共用） ---- */
+.view {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: #000; /* 不透明纯黑：完全遮住底层成员卡片 */
+  overflow: hidden;
+}
+.view[hidden] {
+  display: none;
+}
+.view-stage {
+  position: absolute;
+  inset: 0;
+}
+.view-canvas.main {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  height: 230px;
+  width: auto;
+  border-radius: 8px;
+  background: #000;
+}
+.view-canvas.pip {
+  position: absolute;
+  z-index: 2; /* 固定浮于主画面之上（与 DOM 插入顺序无关） */
+  right: 12px;
+  bottom: 12px;
+  width: 176px;
+  height: auto;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  cursor: move;
+  touch-action: none;
+  background: #000;
+}
+.view-btn {
+  position: absolute;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.7);
+  color: #e2e8f0;
+  font-size: 16px;
+  cursor: pointer;
+  z-index: 21;
+}
+.view-btn:hover {
+  background: rgba(30, 41, 59, 0.95);
+}
+.view-close {
+  left: 10px;
+  top: 10px;
+}
+/* R1：观看人数徽标（× 右侧；0 或视图未开时由 JS 置 hidden）。注意不设 display，避免覆盖 [hidden] */
+.view-viewers {
+  position: absolute;
+  left: 50px;
+  top: 10px;
+  height: 32px;
+  line-height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.7);
+  color: #e2e8f0;
+  font-size: 12px;
+  z-index: 21;
+}
+.view-fs {
+  right: 10px;
+  top: 10px;
+}
+.view-fs.on {
+  background: #3b82f6;
+}
+/* R2：预览模式右下角 ⚙（替代 ⛶ 的位置；仅预览且有投屏时由 JS 显示） */
+.view-settings {
+  right: 10px;
+  bottom: 10px;
+}
+/* R2：预览时摄像头小窗上移，避让右下角 ⚙ */
+#view.preview .view-canvas.pip {
+  bottom: 56px;
+}
+/* R2：预览 <video> 等比完整显示 */
+video.view-canvas {
+  object-fit: contain;
 }

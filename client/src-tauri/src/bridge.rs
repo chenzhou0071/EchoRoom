@@ -74,6 +74,8 @@ pub struct AppState {
     pub sharing: std::sync::atomic::AtomicBool,
     /// 屏幕捕获会话（Drop 即停止）
     pub screen_cap: Mutex<Option<crate::audio::screen_capture::ScreenCaptureHandle>>,
+    /// 观看线程停止旗标（None = 未在观看）
+    pub watching: Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 // ---- UI 命令 ----
@@ -327,6 +329,75 @@ pub fn send_video_frame(state: State<AppState>, request: tauri::ipc::Request<'_>
     let n = VIDEO_FRAMES.fetch_add(1, Ordering::Relaxed);
     if n % 150 == 0 {
         println!("[video] 上行帧 #{n}");
+    }
+    Ok(())
+}
+
+// ---- 观看命令（计划2 B / Task 9）----
+
+/// 开始观看某人：订阅 + 建视频下行线程（新调用会替换旧观看线程）。
+/// 下行帧格式：[uid u16 BE][kind u8][keyframe u8][annexb data]
+/// 二进制通道走 InvokeResponseBody::Raw（spike A4：Channel<Vec<u8>> 会退化成 JSON 数组）。
+#[tauri::command]
+pub fn watch_start(
+    state: State<AppState>,
+    ch: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    target: u16,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // 先取视频接收端（音频管线启动后才有）——先于订阅校验，避免失败时留下悬挂订阅
+    let rx = {
+        let audio = state.audio.lock().unwrap();
+        let Some(ah) = audio.as_ref() else {
+            return Err("音频管线未启动".into());
+        };
+        ah.video_rx.clone()
+    };
+    // 停旧观看线程
+    if let Some(old) = state.watching.lock().unwrap().take() {
+        old.store(true, Ordering::Relaxed);
+    }
+    // 订阅（服务器开始把 target 的流转给本端）
+    {
+        let slot = state.net.lock().unwrap();
+        let h = slot.as_ref().ok_or("未连接")?;
+        h.tx.send(NetCmd::Subscribe(Some(target))).map_err(|e| e.to_string())?;
+    }
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    *state.watching.lock().unwrap() = Some(stop.clone());
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            let item = {
+                let guard = rx.lock().unwrap();
+                guard.recv_timeout(std::time::Duration::from_millis(100))
+            };
+            match item {
+                Ok(frame) => {
+                    let mut payload = Vec::with_capacity(4 + frame.data.len());
+                    payload.extend_from_slice(&frame.uid.to_be_bytes());
+                    payload.push(frame.kind);
+                    payload.push(if frame.keyframe { 1 } else { 0 });
+                    payload.extend_from_slice(&frame.data);
+                    if ch.send(tauri::ipc::InvokeResponseBody::Raw(payload)).is_err() {
+                        break; // 前端已销毁
+                    }
+                }
+                Err(_) => continue, // 超时：循环检查 stop
+            }
+        }
+    });
+    Ok(())
+}
+
+/// 停止观看：退订 + 停线程
+#[tauri::command]
+pub fn watch_stop(state: State<AppState>) -> Result<(), String> {
+    if let Some(old) = state.watching.lock().unwrap().take() {
+        old.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let slot = state.net.lock().unwrap();
+    if let Some(h) = slot.as_ref() {
+        let _ = h.tx.send(NetCmd::Subscribe(None));
     }
     Ok(())
 }

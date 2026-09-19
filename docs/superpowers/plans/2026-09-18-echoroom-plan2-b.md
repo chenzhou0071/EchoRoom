@@ -2394,7 +2394,7 @@ window.videoCapture = (() => {
 ---
 
 ### Task 9: 前端——解码与观看视图（video_view.js）
-> ⚠ 修订 R1（见文末）：`video_view.js` 增加 `setViewerCount(n)`——左上角 × 右侧显示"👀 N 人在看"。
+> ⚠ 修订 R1（见文末）：`video_view.js` 增加 `setViewerCount(n)`——左上角 × 右侧显示"N 人在看"。
 
 **Files:**
 - Create: `client/ui/video_view.js`
@@ -2781,7 +2781,7 @@ script 引入顺序（app.js 之前、video_capture.js 之后）：
   position: absolute;
   inset: 0;
   z-index: 20;
-  background: rgba(15, 23, 42, 0.6);
+  background: #000; /* 不透明纯黑：完全遮住底层成员卡片 */
   overflow: hidden;
 }
 .view[hidden] {
@@ -2803,6 +2803,7 @@ script 引入顺序（app.js 之前、video_capture.js 之后）：
 }
 .view-canvas.pip {
   position: absolute;
+  z-index: 2; /* 固定浮于主画面之上（与 DOM 插入顺序无关） */
   right: 12px;
   bottom: 12px;
   width: 176px;
@@ -3112,7 +3113,7 @@ document.addEventListener("click", (e) => {
   });
 ```
 
-(d) `volume` 监听之后、`conn` 监听之前插入四个新监听：
+(d) `volume` 监听之后、`conn` 监听之前插入四个新监听（⚠ T9 执行记录：`viewer_count`、`request_keyframe` 两条已在 T9 验证期加入 app.js——观看门控/徽标必需；此处跳过，仅插入 `stream_state`、`share_audio` 两条）：
 
 ```js
   await listen("stream_state", (e) => {
@@ -3356,7 +3357,7 @@ Expected: 全绿；`cargo tauri dev` 能启动，投屏/观看入口仍在（无
 ### R1（2026-09-19）：观看人数显示与"谁在看"名单
 
 **需求（用户确认）**：
-- 观看视图（点纱出现的画面窗口）：左上角 × 按钮右侧悬浮显示"👀 N 人在看"（N = 当前观看该流的总人数，各观众看到的一致）
+- 观看视图（点纱出现的画面窗口）：左上角 × 按钮右侧悬浮显示"N 人在看"（N = 当前观看该流的总人数，各观众看到的一致）
 - 投屏者的投屏设置面板（sharePop，仅投屏中显示）：新增只读一行"正在观看：小K、阿信"（无人在看 → "暂无"）
 - 不新增"流主预览自己流"的入口（观看视图仍仅观看者可用）
 
@@ -3375,16 +3376,41 @@ Expected: 全绿；`cargo tauri dev` 能启动，投屏/观看入口仍在（无
 - 收到 `Viewers { uids }` → `shared.viewer_count.store(uids.len())`（屏幕音频/视频门控语义不变）+ `bridge.emit_viewer_count(uids)`（前端事件 payload = uid 数组）
 
 **前端（Task 9/10 增量）**：
-- `video_view.js`：新增 `setViewerCount(n)`——正在观看时在窗口左上角（× 右侧）显示"👀 N 人在看"；退出/切换观看时清除；双路视图挂主画面窗口
+- `video_view.js`：新增 `setViewerCount(n)`——正在观看时在窗口左上角（× 右侧）显示"N 人在看"；退出/切换观看时清除；双路视图挂主画面窗口
 - `app.js` `listen("viewer_count")`：`const uids = e.payload; videoCapture.setViewerCount(uids.length); videoView.setViewerCount(uids.length); updateShareViewers(uids);`
 - `updateShareViewers(uids)`：缓存最近名单；投屏面板打开时渲染"正在观看：…"（uid → members 昵称表，缺失显示 uid；空数组 → "暂无"）
 - `style.css`：角落徽标（半透明底、小字号）与面板名单行样式
 
 **验收增量（Task 11 验收表追加）**：
-| 11 | B 点 A 的纱 | A 投屏面板显示"正在观看：B"；B 观看视图角落显示"👀 1 人在看" |
-| 12 | C 也看 A；随后 B 退出 | B、C 角落均显示"👀 2 人在看"；A 面板显示"正在观看：B、C"；B 退出后 C 变"👀 1 人在看"、A 面板剩"正在观看：C" |
+| 11 | B 点 A 的纱 | A 投屏面板显示"正在观看：B"；B 观看视图角落显示"1 人在看" |
+| 12 | C 也看 A；随后 B 退出 | B、C 角落均显示"2 人在看"；A 面板显示"正在观看：B、C"；B 退出后 C 变"1 人在看"、A 面板剩"正在观看：C" |
 
 **执行时机**：协议层升级在 Task 4 开始前完成（作为 Task 4 的 Step 0 或独立小提交）；前端两项随 Task 9/10 原步骤一并实现。
 
 ---
+
+### R2（2026-09-19）：流主本地自预览（观看视图预览模式）
+
+> 替代 R1 中"不新增'流主预览自己流'的入口（观看视图仍仅观看者可用）"的决定。
+
+**需求（用户确认）**：
+- 点投屏 / 开摄像头 → 自动进入观看视图（预览模式）；画面来源为本地采集流（0 延迟、不订阅服务器、不计入观看人数、服务器零改动）
+- 预览布局与观众看到的完全一致（非全屏形态）：单路无右下角小窗；双路（投屏+摄像头）→ 投屏主画面 + 摄像头小窗（可拖移/缩放）
+- 预览视图保留：左上角 × 按钮、N 人在看（N = 真实观众数）
+- 右下角（观众视图 ⛶ 全屏按钮的位置）改为"⚙ 设置"图标（仅投屏中存在时显示）→ 打开投屏设置面板；投屏设置面板不再自动弹出；全屏按钮在预览模式不提供
+- × 语义按身份分派：观众点 × = 退订退出（原有）；流主点 × = 停止共享（单路停那路；双路全部停止并退出）
+- 两路全停（任意方式）→ 自动退出视图
+
+**实现要点（Task 9/10 增量）**：
+- `video_view.js`：新增预览会话——每路一个 `<video autoplay muted playsinline>`（srcObject = 采集流），定位复用 `.view-canvas` 的 main/pip 布局与拖拽缩放；`preview(kind, stream)` 添加/替换一路，流停止时移除、全停退出；预览与观看互斥（进入预览前先 `end()`）；右下角 ⚙ 仅预览模式且有投屏时显示（观看模式仍为 ⛶）
+- `video_capture.js`：暴露 `getStream(kind)`（返回当前采集流，供预览渲染）
+- `app.js`：`startScreen`/`startCamera` 成功后把流交给 `videoView.preview(...)`；`stop(kind)` 后刷新/退出预览；投屏设置面板（sharePop）不再自动弹出，由预览视图右下角 ⚙ 触发（面板浮层定位于右下角）；× 在预览模式调用 `videoCapture.stop(0/1)`（双路全部停止），视图退出统一由流的停止逻辑驱动；`renderMembers()` 重建卡片时必须保留内嵌 `#view` 节点（`innerHTML = ""` 会连带销毁覆盖层，导致 video_view.js 的引用/监听器全部失效——T9 验证时已修正）
+- `style.css`：预览视频元素样式（`object-fit: contain`）、⚙ 按钮复用 `.view-btn`
+
+**验收增量（Task 11 验收表追加）**：
+| 13 | 自己点投屏 | 自动进入预览（居中画面、无小窗）；点 × → 投屏停止并退出预览 |
+| 14 | 自己投屏+摄像头 | 预览 = 投屏主画面 + 摄像头小窗（可拖动）；人数随真实观众变化 |
+| 15 | 预览中点右下角 ⚙ | 打开投屏设置面板；切档位/关系统声音效果与既有验收一致；停止投屏后面板与预览一并退出 |
+
+**执行时机**：随 Task 9/10 原步骤一并实现。
 

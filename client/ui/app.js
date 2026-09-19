@@ -109,7 +109,9 @@ function buildCard(uid, m) {
 
 function renderMembers() {
   const box = el("members");
+  const view = el("view"); // 观看视图覆盖层：重建卡片时保留原节点（video_view.js 的引用与监听器不失效）
   box.innerHTML = "";
+  if (view) box.appendChild(view);
   for (const [uid, m] of sortedMembers()) box.appendChild(buildCard(uid, m));
 }
 
@@ -335,6 +337,14 @@ async function init() {
       }
     }
   });
+  // R1/R2（T9 先行）：观看名单——人数驱动投屏门控（0→N 恢复编码+强制关键帧）与观看视图徽标
+  await listen("viewer_count", (e) => {
+    const uids = e.payload; // uid 数组，人数 = length
+    videoCapture.setViewerCount(uids.length);
+    videoView.setViewerCount(uids.length);
+  });
+  // 观看端请求关键帧（秒开/解码恢复）→ 本端强制下一帧为 IDR
+  await listen("request_keyframe", () => videoCapture.forceKeyframe());
   await listen("conn", (e) => setConn(e.payload));
 
   const cfg = await invoke("get_config");

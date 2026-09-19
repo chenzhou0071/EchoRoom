@@ -19,7 +19,15 @@
     </aside>
 
     <div class="app-main">
-      <section class="members" id="members"></section>
+      <section class="members" id="members">
+        <section class="view" id="view" hidden>
+          <div class="view-stage" id="view-stage"></div>
+          <button class="view-btn view-close" id="view-close" title="关闭">×</button>
+          <span class="view-viewers" id="view-viewers" hidden></span>
+          <button class="view-btn view-fs" id="view-fs" title="全屏">⛶</button>
+          <button class="view-btn view-settings" id="view-settings" title="投屏设置" hidden>⚙</button>
+        </section>
+      </section>
       <section class="chat" id="chat"></section>
 
       <footer class="inputbar">
@@ -39,6 +47,7 @@
   </div>
 
   <script src="video_capture.js"></script>
+  <script src="video_view.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

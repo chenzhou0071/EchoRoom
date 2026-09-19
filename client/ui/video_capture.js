@@ -163,6 +163,7 @@ window.videoCapture = (() => {
     if (kind === STREAM_SCREEN) {
       await invoke("set_share_active", { active: false }).catch(() => {});
     }
+    window.videoView?.stopPreview?.(kind); // R2：预览中该路停止 → 视图同步移除；全停则退出
   }
 
   function setQuality(name) {
@@ -196,5 +197,6 @@ window.videoCapture = (() => {
     forceKeyframe,
     setViewerCount,
     isActive: (kind) => sessions.has(kind),
+    getStream: (kind) => sessions.get(kind)?.stream ?? null, // R2：自预览取流
   };
 })();
