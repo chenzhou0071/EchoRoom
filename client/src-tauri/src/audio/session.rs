@@ -1,7 +1,7 @@
 //! 音频管线编排：采集（含 RNNoise 降噪）→ Opus → UDP 发送；
 //! UDP 接收 → 抖动缓冲 → Opus 解码（缺帧 PLC）→ 混音软限幅 → WASAPI 播放。
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +26,10 @@ pub struct SharedAudio {
     pub peer_gains: Arc<std::sync::Mutex<HashMap<String, f32>>>,
     /// uid → 昵称（网络线程维护；播放端按 uid 查增益）
     pub uid_names: Arc<std::sync::Mutex<HashMap<u16, String>>>,
+    /// 本端流位图镜像（bit0 = 投屏、bit1 = 摄像头；重连补报用）
+    pub my_streams: Arc<AtomicU8>,
+    /// 当前订阅人数（屏幕音频推流门控；LoginOk 归零）
+    pub viewer_count: Arc<AtomicU16>,
 }
 
 impl SharedAudio {
@@ -35,6 +39,8 @@ impl SharedAudio {
             self_muted: Arc::new(AtomicBool::new(muted)),
             peer_gains: Arc::new(std::sync::Mutex::new(peer_gains)),
             uid_names: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            my_streams: Arc::new(AtomicU8::new(0)),
+            viewer_count: Arc::new(AtomicU16::new(0)),
         }
     }
 }

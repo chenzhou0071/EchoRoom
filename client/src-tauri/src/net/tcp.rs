@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
-use echoroom_protocol::messages::TcpMessage;
+use echoroom_protocol::messages::{TcpMessage, STREAM_CAMERA, STREAM_SCREEN};
 use echoroom_protocol::tcp;
 
 use crate::bridge::{Bridge, ConnState};
@@ -16,6 +16,12 @@ pub enum NetCmd {
     SendChat(String),
     SetSpeaking(bool),
     SetMuted(bool),
+    /// 订阅某人（None = 取消订阅）
+    Subscribe(Option<u16>),
+    /// 请求目标发关键帧
+    RequestKeyframe(u16),
+    /// 上报本端某路流开/停（kind = STREAM_*）
+    SetStream { kind: u8, on: bool },
     Shutdown,
 }
 
@@ -139,6 +145,18 @@ fn run_session(
                 NetCmd::SetMuted(on) => {
                     stream.write_all(&tcp::encode(&TcpMessage::Mute { uid: 0, on }))?;
                 }
+                NetCmd::Subscribe(Some(target)) => {
+                    stream.write_all(&tcp::encode(&TcpMessage::Subscribe { uid: 0, target }))?;
+                }
+                NetCmd::Subscribe(None) => {
+                    stream.write_all(&tcp::encode(&TcpMessage::Unsubscribe { uid: 0 }))?;
+                }
+                NetCmd::RequestKeyframe(target) => {
+                    stream.write_all(&tcp::encode(&TcpMessage::RequestKeyframe { uid: 0, target }))?;
+                }
+                NetCmd::SetStream { kind, on } => {
+                    stream.write_all(&tcp::encode(&TcpMessage::StreamState { uid: 0, kind, on }))?;
+                }
                 NetCmd::Shutdown => return Ok(SessionEnd::Shutdown),
             }
         }
@@ -181,6 +199,17 @@ fn run_session(
                             if my_muted {
                                 stream.write_all(&tcp::encode(&TcpMessage::Mute { uid: 0, on: true }))?;
                             }
+                            // 重连：把本地仍在推的流重新声明给新会话（服务器端状态随旧连接清零）
+                            {
+                                let bm = shared.my_streams.load(Ordering::Relaxed);
+                                for kind in [STREAM_SCREEN, STREAM_CAMERA] {
+                                    if bm & (1 << kind) != 0 {
+                                        stream.write_all(&tcp::encode(&TcpMessage::StreamState { uid: 0, kind, on: true }))?;
+                                    }
+                                }
+                            }
+                            // 观众数随新会话归零（服务器接线后会推回真实值）
+                            shared.viewer_count.store(0, Ordering::Relaxed);
                             // 启动音频链路（麦克风/编码/播放/VAD 上报；失败不影响文字聊天）
                             crate::bridge::start_audio(&bridge.app, uid, token, addr.to_string(), tx.clone());
                         }
@@ -199,6 +228,12 @@ fn run_session(
                         TcpMessage::Chat { uid, text } => bridge.emit_chat(uid, text),
                         TcpMessage::Speaking { uid, on } => bridge.emit_speaking(uid, on),
                         TcpMessage::Muted { uid, on } => bridge.emit_muted(uid, on),
+                        TcpMessage::StreamState { uid, kind, on } => bridge.emit_stream_state(uid, kind, on),
+                        TcpMessage::Viewers { uids } => {
+                            shared.viewer_count.store(uids.len() as u16, Ordering::Relaxed);
+                            bridge.emit_viewer_count(&uids);
+                        }
+                        TcpMessage::RequestKeyframe { .. } => bridge.emit_request_keyframe(),
                         _ => {}
                     }
                 }

@@ -51,6 +51,16 @@ impl Bridge {
         };
         let _ = self.app.emit("conn", s);
     }
+    pub fn emit_stream_state(&self, uid: u16, kind: u8, on: bool) {
+        let _ = self.app.emit("stream_state", serde_json::json!({ "uid": uid, "kind": kind, "on": on }));
+    }
+    /// R1：观看名单（uid 数组；人数 = len）
+    pub fn emit_viewer_count(&self, uids: &[u16]) {
+        let _ = self.app.emit("viewer_count", uids);
+    }
+    pub fn emit_request_keyframe(&self) {
+        let _ = self.app.emit("request_keyframe", ());
+    }
 }
 
 /// 应用状态：配置 + 当前网络会话 + 音频管线
@@ -196,4 +206,37 @@ pub fn start_audio(
         Ok(h) => *slot = Some(h),
         Err(e) => eprintln!("[audio] 管线启动失败: {e:#}"),
     }
+}
+
+// ---- 投屏/观看命令（计划2 B）----
+
+/// 订阅（None = 取消）：服务器开始/停止把目标的视频转发给本端
+#[tauri::command]
+pub fn subscribe(state: State<AppState>, target: Option<u16>) -> Result<(), String> {
+    let slot = state.net.lock().unwrap();
+    let h = slot.as_ref().ok_or("未连接")?;
+    h.tx.send(NetCmd::Subscribe(target)).map_err(|e| e.to_string())
+}
+
+/// 上报本端某路流开/停：更新共享位图（重连补报）并向服务器广播
+#[tauri::command]
+pub fn report_stream(state: State<AppState>, kind: u8, on: bool) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    let prev = state.shared.my_streams.load(Ordering::Relaxed);
+    let bit = 1u8 << kind;
+    let next = if on { prev | bit } else { prev & !bit };
+    state.shared.my_streams.store(next, Ordering::Relaxed);
+    let slot = state.net.lock().unwrap();
+    if let Some(h) = slot.as_ref() {
+        let _ = h.tx.send(NetCmd::SetStream { kind, on });
+    }
+    Ok(())
+}
+
+/// 请求目标发关键帧（进入观看 / 解码失败时用）
+#[tauri::command]
+pub fn request_keyframe(state: State<AppState>, target: u16) -> Result<(), String> {
+    let slot = state.net.lock().unwrap();
+    let h = slot.as_ref().ok_or("未连接")?;
+    h.tx.send(NetCmd::RequestKeyframe(target)).map_err(|e| e.to_string())
 }
