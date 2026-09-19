@@ -69,6 +69,10 @@ fn speaking_report(
 /// 音频管线句柄：`stop` 置位后所有线程退出（Drop 不自动停止，由上层显式管理）。
 pub struct AudioHandle {
     pub stop: Arc<AtomicBool>,
+    /// 视频帧送入口（前端 send_video_frame 命令写入；UDP 线程消费）
+    pub video_tx: std::sync::mpsc::SyncSender<crate::net::udp::VideoOut>,
+    /// 视频帧接收端（观看时由 bridge 的 watch 线程消费）
+    pub video_rx: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<crate::net::udp::VideoIn>>>,
 }
 
 /// 断流判定：连续 PLC 上限（5 × 40ms 等待 ≈ 200ms 无语音数据即静音，
@@ -113,7 +117,9 @@ pub fn spawn_audio_pipeline(
     shared: SharedAudio,
 ) -> anyhow::Result<AudioHandle> {
     let stop = Arc::new(AtomicBool::new(false));
-    let (tx_pcm, rx_voice) = crate::net::udp::spawn_udp_voice(server_addr, uid, token, stop.clone())?;
+    let (udp_tx, udp_rx) = crate::net::udp::spawn_udp(server_addr, uid, token, stop.clone())?;
+    let tx_pcm = udp_tx.tx_pcm.clone();
+    let rx_voice = udp_rx.rx_voice;
 
     // 采集线程：MicCapture → 累积 960 → 降噪 →（增益）→ VAD → tx_pcm
     {
@@ -262,7 +268,11 @@ pub fn spawn_audio_pipeline(
         });
     }
 
-    Ok(AudioHandle { stop })
+    Ok(AudioHandle {
+        stop,
+        video_tx: udp_tx.tx_video,
+        video_rx: Arc::new(std::sync::Mutex::new(udp_rx.rx_video)),
+    })
 }
 
 #[cfg(test)]
