@@ -124,6 +124,7 @@ body {
 
 /* 头像区 200×200（A 阶段占位剪影；C 阶段接真头像） */
 .member-avatar {
+  position: relative; /* B：纱 / 角标绝对定位基准 */
   height: 200px;
   display: flex;
   align-items: center;
@@ -379,7 +380,7 @@ body {
 .view-fs.on {
   background: #3b82f6;
 }
-/* R2：预览模式右下角 ⚙（替代 ⛶ 的位置；仅预览且有投屏时由 JS 显示） */
+/* R2/R3：预览模式右下角 ⚙（替代 ⛶ 的位置；预览即显示——投屏或摄像头单路均可，由 JS 控制） */
 .view-settings {
   right: 10px;
   bottom: 10px;
@@ -392,3 +393,99 @@ body {
 video.view-canvas {
   object-fit: contain;
 }
+
+/* ---- B：成员卡片流角标 / 观看纱 ---- */
+.member-badge {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #dbeafe;
+  background: rgba(59, 130, 246, .82);
+}
+.member-veil {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, .38);
+}
+.member-veil:hover { background: rgba(15, 23, 42, .58); }
+.watch-btn {
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, .7);
+  color: #e2e8f0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.watch-btn svg { width: 20px; height: 20px; }
+
+/* ---- B：设置面板：投屏 + 摄像头 ---- */
+.share-pop {
+  position: fixed;
+  z-index: 30;
+  width: 172px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+}
+.share-pop.show { display: flex; }
+.share-pop .sp-title { font-size: 12px; color: var(--text-dim); }
+.share-pop .sp-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #cbd0dc;
+  cursor: pointer;
+}
+.share-pop .sp-hint { font-size: 11px; color: var(--err); }
+.share-pop .sp-viewers { font-size: 12px; color: var(--text-dim); }
+.share-pop .sp-viewers span { color: #cbd0dc; }
+.share-pop .sp-stop {
+  margin-top: 2px;
+  padding: 6px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(248, 113, 113, .15);
+  color: var(--err);
+  font-size: 12px;
+  cursor: pointer;
+}
+.share-pop .sp-stop:hover { background: rgba(248, 113, 113, .28); }
+.share-pop .sp-stop.start { background: rgba(59, 130, 246, .16); color: #60a5fa; }
+.share-pop .sp-stop.start:hover { background: rgba(59, 130, 246, .28); }
+/* R3：分区（投屏/摄像头）+ 摄像头开关按钮（蓝=开启，红=关闭） */
+.share-pop .sp-sep { border-top: 1px solid var(--border); margin: 2px 0; }
+.share-pop .sp-screen-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.share-pop .sp-screen-opts[hidden] { display: none; }
+.share-pop .sp-cam {
+  margin-top: 2px;
+  padding: 6px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(59, 130, 246, .16);
+  color: #60a5fa;
+  font-size: 12px;
+  cursor: pointer;
+}
+.share-pop .sp-cam:hover { background: rgba(59, 130, 246, .28); }
+.share-pop .sp-cam.danger { background: rgba(248, 113, 113, .15); color: var(--err); }
+.share-pop .sp-cam.danger:hover { background: rgba(248, 113, 113, .28); }

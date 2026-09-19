@@ -162,12 +162,12 @@ window.videoView = (() => {
     if (show) el.textContent = n + " 人在看";
   }
 
-  // R2：右下角按钮显隐——观看=⛶；预览且有投屏=⚙（#view.preview 同时控制小窗避让样式）
+  // R2/R3：右下角按钮显隐——观看=⛶；预览即显示 ⚙（投屏/摄像头单路均可；#view.preview 同时控制小窗避让样式）
   function refreshButtons() {
     const isPreview = mode === "preview";
     viewEl().classList.toggle("preview", isPreview);
     document.getElementById("view-fs").hidden = isPreview;
-    document.getElementById("view-settings").hidden = !(isPreview && previewVideos[STREAM_SCREEN]);
+    document.getElementById("view-settings").hidden = !isPreview;
   }
 
   async function watch(uid) {

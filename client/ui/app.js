@@ -3,9 +3,14 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 // ---- 状态 ----
-const members = new Map(); // uid → { nickname, speaking, muted }
+const members = new Map(); // uid → { nickname, speaking, muted, streams }
 let myUid = null; // 自己的 uid（self_uid 事件，先于 members 到达）
 let volState = { self_gain: 1.0, muted: false, peer_gains: {} }; // Rust 侧音量真值的本地副本
+// B：投屏设置本地副本（Rust config 为真值）
+let shareQuality = "720p30";
+let shareAudioOn = true;
+let screenAudioOk = false; // Win11 22000+；init 时查询
+let lastViewerUids = []; // R1：最近一次观看名单（投屏面板"正在观看"行）
 
 // ---- 图标（feather 风格内联 SVG，currentColor 随按钮状态变色）----
 const ICONS = {
@@ -14,6 +19,7 @@ const ICONS = {
   volume: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>',
   screen: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
   cam: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>',
+  play: '<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>',
   avatar: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10zm0 2c-5.33 0-9 2.67-9 6v2h18v-2c0-3.33-3.67-6-9-6z"/></svg>',
 };
 
@@ -45,6 +51,26 @@ function buildCard(uid, m) {
   const avatar = document.createElement("div");
   avatar.className = "member-avatar";
   avatar.innerHTML = ICONS.avatar;
+  // 他人正在直播：纱（中央播放按钮，再点退出观看）+ 角标
+  if (!isSelf && m.streams) {
+    const veil = document.createElement("div");
+    veil.className = "member-veil";
+    const watch = document.createElement("button");
+    watch.className = "watch-btn";
+    watch.title = "观看";
+    watch.innerHTML = ICONS.play;
+    watch.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (videoView.watchingUid === uid) videoView.end();
+      else videoView.watch(uid);
+    });
+    veil.appendChild(watch);
+    avatar.appendChild(veil);
+    const badge = document.createElement("div");
+    badge.className = "member-badge";
+    badge.textContent = m.streams === 3 ? "投屏+摄像头" : m.streams & 1 ? "投屏中" : "摄像头中";
+    avatar.appendChild(badge);
+  }
   div.appendChild(avatar);
 
   const bar = document.createElement("div");
@@ -89,17 +115,46 @@ function buildCard(uid, m) {
   });
   btns.appendChild(volBtn);
   if (isSelf) {
+    const screenOn = videoCapture.isActive(videoCapture.STREAM_SCREEN);
     const screenBtn = document.createElement("button");
-    screenBtn.className = "mbtn";
-    screenBtn.disabled = true;
-    screenBtn.title = "即将推出";
+    screenBtn.className = "mbtn mbtn-screen" + (screenOn ? " active acc" : "");
+    screenBtn.title = screenOn ? "投屏设置" : "开始投屏";
     screenBtn.innerHTML = ICONS.screen;
+    screenBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const btn = e.currentTarget; // await 后 currentTarget 失效，先取节点
+      if (videoCapture.isActive(videoCapture.STREAM_SCREEN)) {
+        // 投屏中（预览视图通常盖住卡片）：按钮 = 面板开关
+        if (sharePop.classList.contains("show")) closeSharePop();
+        else openSharePop(btn);
+      } else {
+        // 未投屏：起投屏（系统选择器）→ 成功即自动进入自预览（R2；不自动弹面板）
+        await videoCapture.startScreen();
+        renderMembers(); // 重建卡片（旧节点已脱离 DOM，不能用作定位锚点）
+        if (videoCapture.isActive(videoCapture.STREAM_SCREEN)) {
+          videoView.preview(videoCapture.STREAM_SCREEN, videoCapture.getStream(videoCapture.STREAM_SCREEN));
+        }
+      }
+    });
     btns.appendChild(screenBtn);
+
+    const camOn = videoCapture.isActive(videoCapture.STREAM_CAMERA);
     const camBtn = document.createElement("button");
-    camBtn.className = "mbtn";
-    camBtn.disabled = true;
-    camBtn.title = "即将推出";
+    camBtn.className = "mbtn" + (camOn ? " active acc" : "");
+    camBtn.title = camOn ? "关闭摄像头" : "开启摄像头";
     camBtn.innerHTML = ICONS.cam;
+    camBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) {
+        await videoCapture.stop(videoCapture.STREAM_CAMERA); // 预览退出由流停止逻辑驱动（R2）
+      } else {
+        await videoCapture.startCamera();
+        if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) {
+          videoView.preview(videoCapture.STREAM_CAMERA, videoCapture.getStream(videoCapture.STREAM_CAMERA));
+        }
+      }
+      renderMembers();
+    });
     btns.appendChild(camBtn);
   }
   bar.appendChild(btns);
@@ -193,8 +248,139 @@ volSlider.addEventListener("input", () => {
   }
 });
 
+// ---- 设置面板：投屏 + 摄像头（单例；预览视图右下角 ⚙ 或投屏中卡片按钮开关） ----
+const sharePop = document.createElement("div");
+sharePop.className = "share-pop";
+sharePop.innerHTML = `
+  <div class="sp-title">投屏</div>
+  <div class="sp-screen-opts" id="sp-screen-opts">
+    <label class="sp-row"><input type="radio" name="sp-quality" value="720p30" />720p 30fps</label>
+    <label class="sp-row"><input type="radio" name="sp-quality" value="1080p15" />1080p 15fps</label>
+    <label class="sp-row"><input type="radio" name="sp-quality" value="1080p30" />1080p 30fps</label>
+    <label class="sp-row"><input type="checkbox" id="sp-audio" />共享系统声音<span class="sp-hint" id="sp-audio-hint"></span></label>
+    <div class="sp-viewers">正在观看：<span id="sp-viewers">暂无</span></div>
+  </div>
+  <button class="sp-stop" id="sp-stop">停止投屏</button>
+  <div class="sp-sep"></div>
+  <div class="sp-title">摄像头</div>
+  <button class="sp-cam" id="sp-cam">开启摄像头</button>
+`;
+document.body.appendChild(sharePop);
+
+// R1：投屏面板"正在观看"行（uid → 昵称；空 → 暂无）
+function updateShareViewers(uids) {
+  lastViewerUids = uids;
+  sharePop.querySelector("#sp-viewers").textContent =
+    uids.length === 0 ? "暂无" : uids.map((u) => nicknameOf(u)).join("、");
+}
+
+function applyShareAudioUi() {
+  const cb = sharePop.querySelector("#sp-audio");
+  cb.checked = shareAudioOn && screenAudioOk;
+  cb.disabled = !screenAudioOk;
+  sharePop.querySelector("#sp-audio-hint").textContent = screenAudioOk ? "" : "（需 Win11）";
+}
+
+// R3：内容变高后保持面板底边不越出视口下缘
+function clampSharePop() {
+  const h = sharePop.offsetHeight;
+  const top = parseFloat(sharePop.style.top);
+  if (Number.isNaN(top)) return; // 尚未定位过
+  if (top + h > window.innerHeight - 8) {
+    sharePop.style.top = Math.max(8, window.innerHeight - 8 - h) + "px";
+  }
+}
+
+// R3：面板按流状态刷新——未投屏时投屏区只留"开启投屏"按钮；两路按钮文案随开关状态
+function syncSharePop() {
+  const screenOn = videoCapture.isActive(videoCapture.STREAM_SCREEN);
+  const camOn = videoCapture.isActive(videoCapture.STREAM_CAMERA);
+  sharePop.querySelector("#sp-screen-opts").hidden = !screenOn;
+  const stopBtn = sharePop.querySelector("#sp-stop");
+  stopBtn.textContent = screenOn ? "停止投屏" : "开启投屏";
+  stopBtn.classList.toggle("start", !screenOn);
+  const camBtn = sharePop.querySelector("#sp-cam");
+  camBtn.textContent = camOn ? "关闭摄像头" : "开启摄像头";
+  camBtn.classList.toggle("danger", camOn);
+  if (sharePop.classList.contains("show")) clampSharePop();
+}
+
+function openSharePop(anchor) {
+  syncSharePop(); // 先按流状态定显隐/文案，再测尺寸定位
+  for (const r of sharePop.querySelectorAll('input[name="sp-quality"]')) {
+    r.checked = r.value === shareQuality;
+  }
+  applyShareAudioUi();
+  updateShareViewers(lastViewerUids);
+  const r = anchor.getBoundingClientRect();
+  sharePop.classList.add("show");
+  const w = sharePop.offsetWidth;
+  const h = sharePop.offsetHeight;
+  const left = Math.min(r.left, window.innerWidth - w - 8);
+  let top = r.bottom + 6;
+  if (top + h > window.innerHeight - 8) top = r.top - h - 6;
+  sharePop.style.left = left + "px";
+  sharePop.style.top = top + "px";
+}
+
+function closeSharePop() {
+  sharePop.classList.remove("show");
+}
+
+for (const r of sharePop.querySelectorAll('input[name="sp-quality"]')) {
+  r.addEventListener("change", () => {
+    if (!r.checked) return;
+    shareQuality = r.value;
+    videoCapture.setQuality(shareQuality); // 下一帧起按新档位重配编码器并出新 IDR
+    invoke("set_share_quality", { quality: shareQuality }).catch((e) => console.error("保存投屏档位失败:", e));
+  });
+}
+
+sharePop.querySelector("#sp-audio").addEventListener("change", (e) => {
+  shareAudioOn = e.target.checked;
+  invoke("set_share_audio", { on: shareAudioOn }).catch((e) => console.error("切换共享声音失败:", e));
+});
+
+sharePop.querySelector("#sp-stop").addEventListener("click", async () => {
+  if (videoCapture.isActive(videoCapture.STREAM_SCREEN)) {
+    closeSharePop();
+    await videoCapture.stop(videoCapture.STREAM_SCREEN); // 预览退出由流停止逻辑驱动（R2）
+    renderMembers();
+    return;
+  }
+  // R3：未投屏时同一按钮 = 开启投屏（与卡片投屏按钮同流程）
+  await videoCapture.startScreen();
+  renderMembers(); // 重建卡片（旧节点已脱离 DOM，不能用作定位锚点）
+  if (videoCapture.isActive(videoCapture.STREAM_SCREEN)) {
+    videoView.preview(videoCapture.STREAM_SCREEN, videoCapture.getStream(videoCapture.STREAM_SCREEN));
+  }
+  syncSharePop();
+});
+
+// R3：面板内摄像头开关（自预览中卡片被盖时也能开关摄像头）
+sharePop.querySelector("#sp-cam").addEventListener("click", async () => {
+  if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) {
+    await videoCapture.stop(videoCapture.STREAM_CAMERA); // 预览退出由流停止逻辑驱动（R2）
+  } else {
+    await videoCapture.startCamera();
+    if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) {
+      videoView.preview(videoCapture.STREAM_CAMERA, videoCapture.getStream(videoCapture.STREAM_CAMERA));
+    }
+  }
+  renderMembers();
+  syncSharePop();
+});
+
+// R2：预览视图右下角 ⚙（#view-settings）→ 开关投屏设置面板（锚定该按钮，浮层贴右下）
+document.getElementById("view-settings").addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (sharePop.classList.contains("show")) closeSharePop();
+  else openSharePop(e.currentTarget);
+});
+
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".vol-pop") && !e.target.closest(".mbtn-vol")) closeVolPop();
+  if (!e.target.closest(".share-pop") && !e.target.closest(".mbtn-screen")) closeSharePop();
 });
 
 // ---- 渲染：公屏（两行：昵称：HH:MM / 正文；时间取到达时刻的本地时间） ----
@@ -284,8 +470,8 @@ async function init() {
   });
   await listen("members", (e) => {
     members.clear();
-    for (const [uid, nickname, muted] of e.payload) {
-      members.set(uid, { nickname, speaking: false, muted });
+    for (const [uid, nickname, muted, streams] of e.payload) {
+      members.set(uid, { nickname, speaking: false, muted, streams });
     }
     renderMembers();
     renderOnline();
@@ -296,13 +482,15 @@ async function init() {
   });
   await listen("member_join", (e) => {
     const [uid, nickname] = e.payload;
-    members.set(uid, { nickname, speaking: false, muted: false });
+    members.set(uid, { nickname, speaking: false, muted: false, streams: 0 });
     renderMembers();
     renderOnline();
     playSnd(sndIn); // 别人进入
   });
   await listen("member_leave", (e) => {
-    members.delete(e.payload);
+    const uid = e.payload;
+    if (videoView.watchingUid === uid) videoView.end(); // 被观看者离开：订阅已随其退出失效，直接收尾
+    members.delete(uid);
     renderMembers();
     renderOnline();
     playSnd(sndOut); // 别人退出（自己退出不播：本客户端不会收到自己的 leave 广播）
@@ -342,14 +530,46 @@ async function init() {
     const uids = e.payload; // uid 数组，人数 = length
     videoCapture.setViewerCount(uids.length);
     videoView.setViewerCount(uids.length);
+    updateShareViewers(uids); // R1：投屏面板"正在观看"行
   });
   // 观看端请求关键帧（秒开/解码恢复）→ 本端强制下一帧为 IDR
   await listen("request_keyframe", () => videoCapture.forceKeyframe());
-  await listen("conn", (e) => setConn(e.payload));
+  await listen("stream_state", (e) => {
+    const { uid, kind, on } = e.payload;
+    const m = members.get(uid);
+    if (m) m.streams = on ? m.streams | (1 << kind) : m.streams & ~(1 << kind);
+    renderMembers();
+    // R3：面板管投屏+摄像头两路——随流状态刷新；两路全停（预览退出）才收面板
+    if (uid === myUid) {
+      const anyOn =
+        videoCapture.isActive(videoCapture.STREAM_SCREEN) || videoCapture.isActive(videoCapture.STREAM_CAMERA);
+      if (!anyOn) closeSharePop();
+      else if (sharePop.classList.contains("show")) syncSharePop();
+    }
+    // 正在观看的人停了一路：移除对应画面（两路全停则视图自动退出）
+    if (videoView.watchingUid === uid && !on) videoView.onStreamOff(kind);
+  });
+  await listen("share_audio", (e) => {
+    shareAudioOn = e.payload;
+    applyShareAudioUi();
+  });
+  await listen("conn", (e) => {
+    setConn(e.payload);
+    if (e.payload === "reconnecting") {
+      videoView.end(); // 连接断开：正在观看的流必然中断
+      videoCapture.setViewerCount(0); // 观众数随旧会话清零；重连后由服务器推回
+    }
+  });
 
   const cfg = await invoke("get_config");
   // 音量真值来自 Rust（config 持久化）：初始化本地副本
   volState = { self_gain: cfg.self_gain, muted: cfg.muted, peer_gains: cfg.peer_gains };
+  // B：投屏配置（档位应用给采集模块；声音开关/平台能力供面板显示）
+  shareQuality = cfg.share_quality || "720p30";
+  videoCapture.setQuality(shareQuality);
+  shareAudioOn = cfg.share_audio !== false;
+  screenAudioOk = await invoke("screen_audio_supported").catch(() => false);
+  applyShareAudioUi();
   if (!cfg.nickname) {
     el("setup-mask").classList.remove("hidden");
     el("setup-nickname").focus();
