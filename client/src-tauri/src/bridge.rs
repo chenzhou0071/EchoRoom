@@ -300,3 +300,33 @@ pub fn set_share_quality(state: State<AppState>, quality: String) {
 pub fn screen_audio_supported() -> bool {
     crate::audio::screen_capture::is_supported()
 }
+
+/// 前端编码帧上行（Tauri 原始请求体：[kind u8][keyframe u8][annexb data...]）
+#[tauri::command]
+pub fn send_video_frame(state: State<AppState>, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static VIDEO_FRAMES: AtomicU64 = AtomicU64::new(0);
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("send_video_frame 需要二进制参数".into());
+    };
+    if bytes.len() < 3 {
+        return Err("帧数据过短".into());
+    }
+    let kind = bytes[0];
+    let keyframe = bytes[1] != 0;
+    let data = bytes[2..].to_vec();
+    let tx = {
+        let audio = state.audio.lock().unwrap();
+        audio.as_ref().map(|h| h.video_tx.clone())
+    };
+    let Some(tx) = tx else {
+        return Err("音频管线未启动".into());
+    };
+    tx.try_send(crate::net::udp::VideoOut { kind, keyframe, data })
+        .map_err(|_| "视频队列满".to_string())?;
+    let n = VIDEO_FRAMES.fetch_add(1, Ordering::Relaxed);
+    if n % 150 == 0 {
+        println!("[video] 上行帧 #{n}");
+    }
+    Ok(())
+}

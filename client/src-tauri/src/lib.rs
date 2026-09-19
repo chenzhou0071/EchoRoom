@@ -34,6 +34,7 @@ pub fn run() {
             bridge::set_share_audio,
             bridge::set_share_quality,
             bridge::screen_audio_supported,
+            bridge::send_video_frame,
             spike_echo,
             spike_feed,
             spike_minimize,
