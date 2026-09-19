@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod bridge;
 pub mod config;
+pub mod indicator;
 pub mod net;
 
 use bridge::AppState;
@@ -19,6 +20,7 @@ pub fn run() {
             sharing: std::sync::atomic::AtomicBool::new(false),
             screen_cap: std::sync::Mutex::new(None),
             watching: std::sync::Mutex::new(None),
+            indicator: std::sync::Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             bridge::get_config,

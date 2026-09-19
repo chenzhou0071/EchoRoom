@@ -76,6 +76,8 @@ pub struct AppState {
     pub screen_cap: Mutex<Option<crate::audio::screen_capture::ScreenCaptureHandle>>,
     /// 观看线程停止旗标（None = 未在观看）
     pub watching: Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    /// 屏幕共享提示条隐藏器（投屏期间运行；见 indicator.rs）
+    pub indicator: Mutex<Option<crate::indicator::Hider>>,
 }
 
 // ---- UI 命令 ----
@@ -274,11 +276,20 @@ fn sync_screen_capture(state: &AppState, active: bool) {
     }
 }
 
-/// 投屏开/停（前端在投屏开始/结束时调用；联动屏幕声音采集）
+/// 投屏开/停（前端在投屏开始/结束时调用；联动屏幕声音采集与提示条隐藏）
 #[tauri::command]
 pub fn set_share_active(state: State<AppState>, active: bool) {
     state.sharing.store(active, std::sync::atomic::Ordering::Relaxed);
     sync_screen_capture(&state, active);
+    // 隐藏 WebView2 自带的"正在共享你的屏幕"提示条（仅投屏期间轮询）
+    let mut slot = state.indicator.lock().unwrap();
+    if active {
+        if slot.is_none() {
+            *slot = Some(crate::indicator::Hider::spawn());
+        }
+    } else {
+        *slot = None; // Drop → 停轮询线程
+    }
 }
 
 /// 共享系统声音开关（仅 Win11 支持）
