@@ -6,6 +6,9 @@ pub const VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 10;
 /// 语音包上限（防御异常大包）
 pub const MAX_PACKET: usize = 1200;
+/// 视频分片标志：bit0 = 关键帧（IDR）、bit1 = 该帧末片
+pub const VF_KEYFRAME: u8 = 0x01;
+pub const VF_LAST: u8 = 0x02;
 
 #[derive(Debug, PartialEq)]
 pub enum DecodeError {
@@ -25,6 +28,15 @@ pub fn encode(uid: u16, seq: u32, pkt: &UdpPacket) -> Vec<u8> {
     match pkt {
         UdpPacket::Register { token } => out.extend_from_slice(&token.to_be_bytes()),
         UdpPacket::Voice { opus } => out.extend_from_slice(opus),
+        UdpPacket::VideoChunk { kind, flags, frame_seq, chunk_idx, chunk_count, data } => {
+            out.push(*kind);
+            out.push(*flags);
+            out.extend_from_slice(&frame_seq.to_be_bytes());
+            out.push(*chunk_idx);
+            out.push(*chunk_count);
+            out.extend_from_slice(data);
+        }
+        UdpPacket::ScreenAudio { opus } => out.extend_from_slice(opus),
         UdpPacket::RegisterAck | UdpPacket::RegisterReject | UdpPacket::Heartbeat => {}
     }
     out
@@ -59,6 +71,20 @@ pub fn decode(buf: &[u8]) -> Result<(u16, u32, UdpPacket), DecodeError> {
         3 => UdpPacket::RegisterReject,
         4 => UdpPacket::Voice { opus: payload.to_vec() },
         5 => UdpPacket::Heartbeat,
+        6 => {
+            if payload.len() < 6 {
+                return Err(DecodeError::TooShort);
+            }
+            UdpPacket::VideoChunk {
+                kind: payload[0],
+                flags: payload[1],
+                frame_seq: u16::from_be_bytes([payload[2], payload[3]]),
+                chunk_idx: payload[4],
+                chunk_count: payload[5],
+                data: payload[6..].to_vec(),
+            }
+        }
+        7 => UdpPacket::ScreenAudio { opus: payload.to_vec() },
         other => return Err(DecodeError::UnknownType(other)),
     };
     Ok((uid, seq, pkt))
@@ -77,6 +103,15 @@ mod tests {
             UdpPacket::RegisterReject,
             UdpPacket::Voice { opus: vec![0xAA; 60] },
             UdpPacket::Heartbeat,
+            UdpPacket::VideoChunk {
+                kind: 0,
+                flags: 0x03,
+                frame_seq: 65535,
+                chunk_idx: 2,
+                chunk_count: 5,
+                data: vec![0x5A; 1150],
+            },
+            UdpPacket::ScreenAudio { opus: vec![0xEE; 320] },
         ];
         for (i, pkt) in samples.into_iter().enumerate() {
             let bytes = encode(7, 42 + i as u32, &pkt);
@@ -114,5 +149,22 @@ mod tests {
         let (uid, seq, pkt) = decode(&bytes).unwrap();
         assert_eq!((uid, seq), (65535, u32::MAX));
         assert_eq!(pkt, UdpPacket::Voice { opus });
+    }
+
+    #[test]
+    fn video_chunk_max_size_within_packet_limit() {
+        let bytes = encode(
+            1,
+            0,
+            &UdpPacket::VideoChunk {
+                kind: 1,
+                flags: 0,
+                frame_seq: 0,
+                chunk_idx: 0,
+                chunk_count: 1,
+                data: vec![0u8; crate::VIDEO_CHUNK_DATA],
+            },
+        );
+        assert!(bytes.len() <= MAX_PACKET, "len={} 超上限", bytes.len());
     }
 }

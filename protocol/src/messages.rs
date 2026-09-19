@@ -70,6 +70,10 @@ pub enum UdpPacket {
     Voice { opus: Vec<u8> },
     /// 心跳（seq 用于响应观测）
     Heartbeat,
+    /// 双向：视频分片（kind = STREAM_*；flags bit0 = 关键帧、bit1 = 末片；按 frame_seq + chunk_idx 重组）
+    VideoChunk { kind: u8, flags: u8, frame_seq: u16, chunk_idx: u8, chunk_count: u8, data: Vec<u8> },
+    /// S→C：屏幕声音 Opus 包（48kHz 立体声，20ms）
+    ScreenAudio { opus: Vec<u8> },
 }
 
 impl UdpPacket {
@@ -80,6 +84,8 @@ impl UdpPacket {
             UdpPacket::RegisterReject => 3,
             UdpPacket::Voice { .. } => 4,
             UdpPacket::Heartbeat => 5,
+            UdpPacket::VideoChunk { .. } => 6,
+            UdpPacket::ScreenAudio { .. } => 7,
         }
     }
 }

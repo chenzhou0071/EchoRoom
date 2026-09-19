@@ -72,6 +72,9 @@ pub fn spawn_udp_loop(port: u16, room: Arc<Mutex<Room>>) {
                 UdpPacket::RegisterAck | UdpPacket::RegisterReject => {
                     // 服务器不应收到这两个方向；忽略
                 }
+                UdpPacket::VideoChunk { .. } | UdpPacket::ScreenAudio { .. } => {
+                    // 视频/屏幕声音转发逻辑随 Task 4 实现（当前先忽略）
+                }
             }
         }
     });

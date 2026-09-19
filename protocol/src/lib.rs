@@ -19,3 +19,7 @@ pub const OPUS_BITRATE: i32 = 40_000;
 pub const HEARTBEAT_INTERVAL_MS: u64 = 2000;
 /// UDP 映射超时
 pub const UDP_TIMEOUT_MS: u64 = 15_000;
+/// 视频分片数据上限（包总长 = 10 字节头 + 6 字节载荷头 + 数据 ≤ 1166 < MAX_PACKET）
+pub const VIDEO_CHUNK_DATA: usize = 1150;
+/// 屏幕声音 Opus 码率（立体声）
+pub const SCREEN_OPUS_BITRATE: i32 = 128_000;
