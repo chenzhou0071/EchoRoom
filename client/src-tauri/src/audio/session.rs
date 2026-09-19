@@ -73,6 +73,8 @@ pub struct AudioHandle {
     pub video_tx: std::sync::mpsc::SyncSender<crate::net::udp::VideoOut>,
     /// 视频帧接收端（观看时由 bridge 的 watch 线程消费）
     pub video_rx: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<crate::net::udp::VideoIn>>>,
+    /// 屏幕 PCM 送入口（屏幕捕获线程写入；编码线程消费）
+    pub screen_pcm_tx: std::sync::mpsc::SyncSender<Vec<i16>>,
 }
 
 /// 断流判定：连续 PLC 上限（5 × 40ms 等待 ≈ 200ms 无语音数据即静音，
@@ -174,11 +176,49 @@ pub fn spawn_audio_pipeline(
         });
     }
 
+    // 屏幕音频编码线程：屏幕 PCM（1920 交错样本）→ Opus → UDP（无人观看时丢弃不编码）
+    let (screen_pcm_tx, screen_pcm_rx) = std::sync::mpsc::sync_channel::<Vec<i16>>(16);
+    {
+        let stop = stop.clone();
+        let viewer_count = shared.viewer_count.clone();
+        let tx_screen_audio = udp_tx.tx_screen_audio.clone();
+        std::thread::spawn(move || {
+            let mut enc = match crate::audio::opus::OpusEncStereo::new() {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("[audio] 屏幕音频编码器创建失败: {e}");
+                    return;
+                }
+            };
+            while !stop.load(Ordering::Relaxed) {
+                let pcm = match screen_pcm_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if pcm.len() != FRAME_SAMPLES * 2 {
+                    continue;
+                }
+                if viewer_count.load(Ordering::Relaxed) == 0 {
+                    continue; // 0 观众：不推流
+                }
+                match enc.encode(&pcm) {
+                    Ok(opus) => {
+                        let _ = tx_screen_audio.try_send(opus);
+                    }
+                    Err(e) => eprintln!("[audio] 屏幕音频编码失败: {e}"),
+                }
+            }
+        });
+    }
+
     // 播放线程：drain 语音 → jitter → decode → mix → 声卡
     let mut jbs: HashMap<u16, Sender> = HashMap::new();
     let mut seen: HashSet<u16> = HashSet::new();
     let mut acc = MixAccumulator::new(FRAME_SAMPLES);
     let mut scratch = vec![0i16; FRAME_SAMPLES];
+    // 屏幕音频：解码器 + 单声道降混队列（每播放周期消费）
+    let mut scr_dec: Option<crate::audio::opus::OpusDecStereo> = None;
+    let mut scr_buf: std::collections::VecDeque<i16> = std::collections::VecDeque::new();
     let peer_gains = shared.peer_gains.clone();
     let uid_names = shared.uid_names.clone();
     let player = crate::audio::playback::spawn_player(move |out| {
@@ -188,6 +228,23 @@ pub fn spawn_audio_pipeline(
                 println!("[audio] 首次收到 uid={uid} 的语音");
             }
             jbs.entry(uid).or_insert_with(Sender::new).jb.insert(seq, opus);
+        }
+        // 收屏幕音频：解码 → 降混单声道 → 入队（上限 2s 防积压）
+        while let Ok((_uid, opus)) = udp_rx.rx_screen_audio.try_recv() {
+            if scr_dec.is_none() {
+                scr_dec = crate::audio::opus::OpusDecStereo::new().ok();
+            }
+            if let Some(dec) = scr_dec.as_mut() {
+                let mut st = vec![0i16; FRAME_SAMPLES * 2];
+                if dec.decode(Some(&opus), &mut st).is_ok() {
+                    for i in 0..FRAME_SAMPLES {
+                        scr_buf.push_back(((st[2 * i] as i32 + st[2 * i + 1] as i32) / 2) as i16);
+                    }
+                    while scr_buf.len() > FRAME_SAMPLES * 100 {
+                        scr_buf.pop_front();
+                    }
+                }
+            }
         }
         // 出流：输出驱动拉取——每路按需取样本直到填满声卡周期。
         // 帧余量跨周期保留，消费速率严格等于输出速率（避免每段各取一帧导致帧超量消耗）。
@@ -251,6 +308,12 @@ pub fn spawn_audio_pipeline(
                     got += n;
                 }
             }
+            // 屏幕声音叠加（固定 1.0 增益；所有输出段共用同一队列）
+            let avail = scr_buf.len().min(want);
+            if avail > 0 {
+                let seg: Vec<i16> = scr_buf.drain(..avail).collect();
+                acc.add_scaled(&seg, 1.0);
+            }
             acc.finalize(&mut scratch[..want]);
             out[filled..filled + want].copy_from_slice(&scratch[..want]);
             filled += want;
@@ -272,6 +335,7 @@ pub fn spawn_audio_pipeline(
         stop,
         video_tx: udp_tx.tx_video,
         video_rx: Arc::new(std::sync::Mutex::new(udp_rx.rx_video)),
+        screen_pcm_tx,
     })
 }
 

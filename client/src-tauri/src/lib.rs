@@ -16,6 +16,8 @@ pub fn run() {
             net: std::sync::Mutex::new(None),
             audio: std::sync::Mutex::new(None),
             shared,
+            sharing: std::sync::atomic::AtomicBool::new(false),
+            screen_cap: std::sync::Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             bridge::get_config,
@@ -28,6 +30,10 @@ pub fn run() {
             bridge::subscribe,
             bridge::report_stream,
             bridge::request_keyframe,
+            bridge::set_share_active,
+            bridge::set_share_audio,
+            bridge::set_share_quality,
+            bridge::screen_audio_supported,
             spike_echo,
             spike_feed,
             spike_minimize,

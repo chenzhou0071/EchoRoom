@@ -5,5 +5,6 @@ pub mod jitter;
 pub mod mixer;
 pub mod opus;
 pub mod playback;
+pub mod screen_capture;
 pub mod session;
 pub mod vad;

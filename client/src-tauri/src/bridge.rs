@@ -70,6 +70,10 @@ pub struct AppState {
     pub audio: Mutex<Option<crate::audio::session::AudioHandle>>,
     /// 音量/静音共享态（音频线程、网络线程共享读写）
     pub shared: crate::audio::session::SharedAudio,
+    /// 本端是否正在投屏（屏幕流激活；驱动屏幕捕获生命周期）
+    pub sharing: std::sync::atomic::AtomicBool,
+    /// 屏幕捕获会话（Drop 即停止）
+    pub screen_cap: Mutex<Option<crate::audio::screen_capture::ScreenCaptureHandle>>,
 }
 
 // ---- UI 命令 ----
@@ -239,4 +243,60 @@ pub fn request_keyframe(state: State<AppState>, target: u16) -> Result<(), Strin
     let slot = state.net.lock().unwrap();
     let h = slot.as_ref().ok_or("未连接")?;
     h.tx.send(NetCmd::RequestKeyframe(target)).map_err(|e| e.to_string())
+}
+
+/// 统一切换屏幕捕获期望状态：投屏中 && 共享声音开 && 平台支持。
+/// 已启动但条件不再满足 → Drop 句柄停止；条件满足但未启动 → 尝试启动。
+fn sync_screen_capture(state: &AppState, active: bool) {
+    let want =
+        active && state.config.lock().unwrap().share_audio && crate::audio::screen_capture::is_supported();
+    let mut slot = state.screen_cap.lock().unwrap();
+    if want && slot.is_none() {
+        let tx = {
+            let audio = state.audio.lock().unwrap();
+            audio.as_ref().map(|h| h.screen_pcm_tx.clone())
+        };
+        let Some(tx) = tx else {
+            return; // 音频管线未启动（重连窗口期）：下次调用会再试
+        };
+        match crate::audio::screen_capture::spawn_screen_capture(tx) {
+            Ok(h) => {
+                println!("[screen] 屏幕声音采集启动");
+                *slot = Some(h);
+            }
+            Err(e) => eprintln!("[screen] 采集启动失败: {e:#}"),
+        }
+    } else if !want && slot.is_some() {
+        *slot = None; // Drop → 停止采集
+        println!("[screen] 屏幕声音采集停止");
+    }
+}
+
+/// 投屏开/停（前端在投屏开始/结束时调用；联动屏幕声音采集）
+#[tauri::command]
+pub fn set_share_active(state: State<AppState>, active: bool) {
+    state.sharing.store(active, std::sync::atomic::Ordering::Relaxed);
+    sync_screen_capture(&state, active);
+}
+
+/// 共享系统声音开关（仅 Win11 支持）
+#[tauri::command]
+pub fn set_share_audio(app: AppHandle, state: State<AppState>, on: bool) {
+    state.config.lock().unwrap().share_audio = on;
+    persist(&state);
+    sync_screen_capture(&state, state.sharing.load(std::sync::atomic::Ordering::Relaxed));
+    let _ = app.emit("share_audio", on);
+}
+
+/// 投屏画质档位（仅持久化；编码参数由前端 setQuality 应用）
+#[tauri::command]
+pub fn set_share_quality(state: State<AppState>, quality: String) {
+    state.config.lock().unwrap().share_quality = quality;
+    persist(&state);
+}
+
+/// 系统是否支持共享屏幕声音（Windows 11 build 22000+）
+#[tauri::command]
+pub fn screen_audio_supported() -> bool {
+    crate::audio::screen_capture::is_supported()
 }

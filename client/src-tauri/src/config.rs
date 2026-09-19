@@ -8,6 +8,14 @@ fn default_gain() -> f32 {
     1.0
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_share_quality() -> String {
+    "720p30".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub nickname: String,
@@ -21,6 +29,12 @@ pub struct Config {
     /// 对他人的播放增益（按昵称）
     #[serde(default)]
     pub peer_gains: std::collections::HashMap<String, f32>,
+    /// 投屏画质档位（"720p30" / "1080p15" / "1080p30"）
+    #[serde(default = "default_share_quality")]
+    pub share_quality: String,
+    /// 投屏时是否共享系统声音（Win11+）
+    #[serde(default = "default_true")]
+    pub share_audio: bool,
 }
 
 impl Default for Config {
@@ -31,6 +45,8 @@ impl Default for Config {
             self_gain: 1.0,
             muted: false,
             peer_gains: std::collections::HashMap::new(),
+            share_quality: "720p30".into(),
+            share_audio: true,
         }
     }
 }
@@ -67,6 +83,8 @@ mod tests {
         cfg.self_gain = 1.5;
         cfg.muted = true;
         cfg.peer_gains.insert("小林".into(), 0.5);
+        cfg.share_quality = "1080p15".into();
+        cfg.share_audio = false;
         cfg.save(&path).unwrap();
         let loaded = Config::load(&path);
         assert_eq!(loaded, cfg);
@@ -82,6 +100,8 @@ mod tests {
         assert_eq!(loaded.self_gain, 1.0);
         assert!(!loaded.muted);
         assert!(loaded.peer_gains.is_empty());
+        assert_eq!(loaded.share_quality, "720p30");
+        assert!(loaded.share_audio);
         let _ = std::fs::remove_file(&path);
     }
 }
