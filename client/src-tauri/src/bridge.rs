@@ -21,7 +21,7 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub fn emit_member_list(&self, members: Vec<(u16, String, bool)>) {
+    pub fn emit_member_list(&self, members: Vec<(u16, String, bool, u8)>) {
         let _ = self.app.emit("members", members);
     }
     pub fn emit_member_join(&self, uid: u16, nickname: String) {

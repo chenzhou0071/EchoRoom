@@ -24,10 +24,11 @@ pub fn encode(msg: &TcpMessage) -> Vec<u8> {
             payload.extend_from_slice(&uid.to_be_bytes());
             payload.extend_from_slice(&token.to_be_bytes());
             payload.extend_from_slice(&(members.len() as u16).to_be_bytes());
-            for (uid, name, muted) in members {
+            for (uid, name, muted, streams) in members {
                 payload.extend_from_slice(&uid.to_be_bytes());
                 put_str(&mut payload, name);
                 payload.push(if *muted { 1 } else { 0 });
+                payload.push(*streams);
             }
         }
         TcpMessage::MemberJoin { uid, nickname } => {
@@ -46,6 +47,22 @@ pub fn encode(msg: &TcpMessage) -> Vec<u8> {
         TcpMessage::Mute { uid, on } | TcpMessage::Muted { uid, on } => {
             payload.extend_from_slice(&uid.to_be_bytes());
             payload.push(if *on { 1 } else { 0 });
+        }
+        TcpMessage::StreamState { uid, kind, on } => {
+            payload.extend_from_slice(&uid.to_be_bytes());
+            payload.push(*kind);
+            payload.push(if *on { 1 } else { 0 });
+        }
+        TcpMessage::Subscribe { uid, target } | TcpMessage::RequestKeyframe { uid, target } => {
+            payload.extend_from_slice(&uid.to_be_bytes());
+            payload.extend_from_slice(&target.to_be_bytes());
+        }
+        TcpMessage::Unsubscribe { uid } => payload.extend_from_slice(&uid.to_be_bytes()),
+        TcpMessage::Viewers { uids } => {
+            payload.extend_from_slice(&(uids.len() as u16).to_be_bytes());
+            for uid in uids {
+                payload.extend_from_slice(&uid.to_be_bytes());
+            }
         }
         TcpMessage::LoginReject { reason } => put_str(&mut payload, reason),
     }
@@ -143,7 +160,8 @@ pub fn try_decode(buf: &[u8]) -> Result<Option<(TcpMessage, usize)>, DecodeError
                 let m_uid = field!(r.u16());
                 let name = field!(r.string());
                 let muted = field!(r.u8()) != 0;
-                members.push((m_uid, name, muted));
+                let streams = field!(r.u8());
+                members.push((m_uid, name, muted, streams));
             }
             TcpMessage::LoginOk { uid, token, members }
         }
@@ -169,6 +187,28 @@ pub fn try_decode(buf: &[u8]) -> Result<Option<(TcpMessage, usize)>, DecodeError
             let uid = field!(r.u16());
             TcpMessage::Muted { uid, on: field!(r.u8()) != 0 }
         }
+        10 => {
+            let uid = field!(r.u16());
+            let kind = field!(r.u8());
+            TcpMessage::StreamState { uid, kind, on: field!(r.u8()) != 0 }
+        }
+        11 => {
+            let uid = field!(r.u16());
+            TcpMessage::Subscribe { uid, target: field!(r.u16()) }
+        }
+        12 => TcpMessage::Unsubscribe { uid: field!(r.u16()) },
+        13 => {
+            let count = field!(r.u16()) as usize;
+            let mut uids = Vec::with_capacity(count.min(64));
+            for _ in 0..count {
+                uids.push(field!(r.u16()));
+            }
+            TcpMessage::Viewers { uids }
+        }
+        14 => {
+            let uid = field!(r.u16());
+            TcpMessage::RequestKeyframe { uid, target: field!(r.u16()) }
+        }
         other => return Err(DecodeError::UnknownType(other)),
     };
     Ok(Some((msg, 4 + len)))
@@ -183,13 +223,24 @@ mod tests {
     fn roundtrip_all_variants() {
         let samples = vec![
             TcpMessage::Login { nickname: "阿信".into() },
-            TcpMessage::LoginOk { uid: 3, token: 0xDEAD_BEEF, members: vec![(1, "小K".into(), false), (2, "你".into(), true)] },
+            TcpMessage::LoginOk {
+                uid: 3,
+                token: 0xDEAD_BEEF,
+                members: vec![(1, "小K".into(), false, 0), (2, "你".into(), true, 0b11)],
+            },
             TcpMessage::MemberJoin { uid: 5, nickname: "新来的".into() },
             TcpMessage::MemberLeave { uid: 2 },
             TcpMessage::Chat { uid: 1, text: "晚上开黑吗".into() },
             TcpMessage::Speaking { uid: 4, on: true },
             TcpMessage::Mute { uid: 0, on: true },
             TcpMessage::Muted { uid: 4, on: true },
+            TcpMessage::StreamState { uid: 0, kind: 1, on: true },
+            TcpMessage::StreamState { uid: 4, kind: 0, on: false },
+            TcpMessage::Subscribe { uid: 0, target: 4 },
+            TcpMessage::Unsubscribe { uid: 0 },
+            TcpMessage::Viewers { uids: vec![1, 2, 3] },
+            TcpMessage::Viewers { uids: vec![] },
+            TcpMessage::RequestKeyframe { uid: 0, target: 4 },
             TcpMessage::LoginReject { reason: "房间已满（6人）".into() },
         ];
         for msg in samples {

@@ -165,7 +165,7 @@ fn run_session(
                             {
                                 let mut names = shared.uid_names.lock().unwrap();
                                 names.clear();
-                                for (u, n, _) in &members {
+                                for (u, n, _, _) in &members {
                                     names.insert(*u, n.clone());
                                 }
                                 names.insert(uid, nickname.to_string());
@@ -175,7 +175,7 @@ fn run_session(
                             // 自己的 muted 取本地当前值（重连后保持界面与实际一致）
                             let my_muted = shared.self_muted.load(Ordering::Relaxed);
                             let mut all = members;
-                            all.push((uid, nickname.to_string(), my_muted));
+                            all.push((uid, nickname.to_string(), my_muted, 0));
                             bridge.emit_member_list(all);
                             // 重连后若本地处于静音，向新会话重新声明（否则服务器端 muted=false，别人看不到）
                             if my_muted {

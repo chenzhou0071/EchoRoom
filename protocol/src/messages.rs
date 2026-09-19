@@ -1,11 +1,15 @@
 //! TCP 控制消息定义。类型号固定，客户端与服务端共用。
 
+/// 流类型常量（u8 位图 bit0 = 屏幕 / bit1 = 摄像头）
+pub const STREAM_SCREEN: u8 = 0;
+pub const STREAM_CAMERA: u8 = 1;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TcpMessage {
     /// C→S：进入房间
     Login { nickname: String },
-    /// S→C：登录成功（uid、token、已有成员；成员 = (uid, 昵称, 是否静音)）
-    LoginOk { uid: u16, token: u32, members: Vec<(u16, String, bool)> },
+    /// S→C：登录成功（uid、token、已有成员；成员 = (uid, 昵称, 是否静音, 流位图)）
+    LoginOk { uid: u16, token: u32, members: Vec<(u16, String, bool, u8)> },
     /// S→C：有成员加入
     MemberJoin { uid: u16, nickname: String },
     /// S→C：有成员离开
@@ -18,6 +22,16 @@ pub enum TcpMessage {
     Mute { uid: u16, on: bool },
     /// S→C 广播静音状态（含发送者本人）
     Muted { uid: u16, on: bool },
+    /// 双向：C→S（uid 填 0）上报本端开/停某路流；S→C 广播（uid 为流主）
+    StreamState { uid: u16, kind: u8, on: bool },
+    /// C→S（uid 填 0）：订阅某人的视频流（覆盖式）
+    Subscribe { uid: u16, target: u16 },
+    /// C→S（uid 填 0）：取消订阅
+    Unsubscribe { uid: u16 },
+    /// S→C 定向（发给流主与该流全部订阅者）：当前观看者 uid 名单（人数 = len）
+    Viewers { uids: Vec<u16> },
+    /// 双向：C→S（uid 填 0）请求目标发关键帧；S→C 转发（uid 为请求者）
+    RequestKeyframe { uid: u16, target: u16 },
     /// S→C：房间满等拒绝原因
     LoginReject { reason: String },
 }
@@ -34,6 +48,11 @@ impl TcpMessage {
             TcpMessage::LoginReject { .. } => 7,
             TcpMessage::Mute { .. } => 8,
             TcpMessage::Muted { .. } => 9,
+            TcpMessage::StreamState { .. } => 10,
+            TcpMessage::Subscribe { .. } => 11,
+            TcpMessage::Unsubscribe { .. } => 12,
+            TcpMessage::Viewers { .. } => 13,
+            TcpMessage::RequestKeyframe { .. } => 14,
         }
     }
 }

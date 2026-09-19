@@ -4,14 +4,14 @@
 
 **Goal:** 为 EchoRoom 加入投屏（屏幕画面 + 系统声音）与摄像头视频：WebView 内 WebCodecs 采集编码、订阅式 UDP 转发、观看视图（单路画面 / 投屏主画面 + 摄像头小窗组合）。
 
-**Architecture:** 全 WebView + WebCodecs 路线：前端 `getDisplayMedia`/`getUserMedia` 采集 → `MediaStreamTrackProcessor` 取帧 → canvas 缩放 → `VideoEncoder`(H.264 annexb) → Tauri 二进制 IPC → Rust UDP 分片（≤1150B/片）；观看端反向（UDP 重组 → IPC Channel → `VideoDecoder` → canvas）。屏幕声音独立走 Rust WASAPI 进程回路（EXCLUDE 自身进程树）→ 立体声 Opus → UDP。服务器新增订阅表：视频/屏幕音频只转发给订阅者；`ViewerCount` 驱动推流启停（无人看不推）。
+**Architecture:** 全 WebView + WebCodecs 路线：前端 `getDisplayMedia`/`getUserMedia` 采集 → `MediaStreamTrackProcessor` 取帧 → canvas 缩放 → `VideoEncoder`(H.264 annexb) → Tauri 二进制 IPC → Rust UDP 分片（≤1150B/片）；观看端反向（UDP 重组 → IPC Channel → `VideoDecoder` → canvas）。屏幕声音独立走 Rust WASAPI 进程回路（EXCLUDE 自身进程树）→ 立体声 Opus → UDP。服务器新增订阅表：视频/屏幕音频只转发给订阅者；`Viewers`（观看者名单/人数）驱动推流启停（无人看不推）。
 
 **Tech Stack:** Rust（protocol / server / client；新增 `windows` crate 做进程回路）+ Tauri v2（`withGlobalTauri`）+ 原生 HTML/CSS/JS（WebCodecs / MediaStreamTrackProcessor / OffscreenCanvas，无构建工具）。
 
 ## Global Constraints
 
 - 目标平台 Windows：Win11（build ≥ 22000）完整功能；Win10 视频可用、"共享系统声音"置灰并提示"需要 Windows 11"
-- TCP 消息 type：`StreamState`=10（双向）/ `Subscribe`=11 / `Unsubscribe`=12 / `ViewerCount`=13 / `RequestKeyframe`=14；`LoginOk.members` 变四元组 `(u16, String, bool, u8)`（第四位 = 流位图）
+- TCP 消息 type：`StreamState`=10（双向）/ `Subscribe`=11 / `Unsubscribe`=12 / `Viewers`=13（uid 名单版，见修订 R1）/ `RequestKeyframe`=14；`LoginOk.members` 变四元组 `(u16, String, bool, u8)`（第四位 = 流位图）
 - UDP 包 type：6=`VideoChunk`、7=`ScreenAudio`；帧分片数据 ≤ 1150B（包总长 = 10 头 + 6 载荷头 + ≤1150 < `MAX_PACKET` 1200）
 - 流类型常量：`STREAM_SCREEN=0`、`STREAM_CAMERA=1`（u8 位图 bit0/bit1）；分片标志：`VF_KEYFRAME=0x01`、`VF_LAST=0x02`
 - H.264 统一 `avc1.640028` + `avc: {format:"annexb"}`（带内 SPS/PPS，无 description）；自然关键帧 2s；订阅/解码失败时请求关键帧
@@ -426,6 +426,7 @@ fn main() -> anyhow::Result<()> {
 ---
 
 ### Task 2: 协议扩展——TCP 流消息（type 10–14）+ members 四元组
+> ⚠ 修订 R1（见文末）：`ViewerCount { n }` 升级为 `Viewers { uids: Vec<u16> }`（名单版），实现与测试按 R1 调整。
 
 **Files:**
 - Modify: `protocol/src/messages.rs`
@@ -765,6 +766,7 @@ Expected: 全绿（含新样本 roundtrip 与满片尺寸测试）
 ---
 
 ### Task 4: 服务器——订阅表与流状态
+> ⚠ 修订 R1（见文末）：ViewerCount 发送点全部改为 `Viewers`（发流主+该流全部订阅者）；新增 `Room::viewers_of`。
 
 **Files:**
 - Modify: `server/src/room.rs`
@@ -1039,6 +1041,7 @@ Expected: 编译通过、测试全绿
 ---
 
 ### Task 5: 客户端 TCP 接线 + 共享状态基建
+> ⚠ 修订 R1（见文末）：收到 `Viewers { uids }` → `viewer_count = uids.len()` + emit `viewer_count`（payload = uid 数组）。
 
 **Files:**
 - Modify: `client/src-tauri/src/net/tcp.rs`
@@ -2391,6 +2394,7 @@ window.videoCapture = (() => {
 ---
 
 ### Task 9: 前端——解码与观看视图（video_view.js）
+> ⚠ 修订 R1（见文末）：`video_view.js` 增加 `setViewerCount(n)`——左上角 × 右侧显示"👀 N 人在看"。
 
 **Files:**
 - Create: `client/ui/video_view.js`
@@ -2848,6 +2852,7 @@ script 引入顺序（app.js 之前、video_capture.js 之后）：
 ---
 
 ### Task 10: 前端 UI 接线——卡片纱/角标、发送端按钮与投屏面板（app.js + style.css）
+> ⚠ 修订 R1（见文末）：`viewer_count` 分发扩展 + 投屏面板"正在观看"名单行（uids → 昵称）。
 
 **Files:**
 - Modify: `client/ui/app.js`
@@ -3286,6 +3291,7 @@ document.addEventListener("click", (e) => {
 ---
 
 ### Task 11: 全量验收与 spike 清理
+> ⚠ 修订 R1（见文末）：验收表追加第 11、12 条（观看人数/名单联动）。
 
 **Files:**
 - Delete: `client/ui/spike.html`、`client/ui/spike.js`、`client/src-tauri/src/bin/screen_probe.rs`
@@ -3342,6 +3348,43 @@ Expected: 全绿；`cargo tauri dev` 能启动，投屏/观看入口仍在（无
 - 观看端：纱入口 → 单路主画面 / 双路主+小窗（拖移、缩放、全屏）；关键帧请求秒开
 - 链路：UDP 分片与重组、自然/请求 IDR、人数门控、重连补报流状态
 - 范围外（后续子项目）：真实头像（C 阶段）、多人多路观看、录制回放
+
+---
+
+## 修订记录（执行期新增）
+
+### R1（2026-09-19）：观看人数显示与"谁在看"名单
+
+**需求（用户确认）**：
+- 观看视图（点纱出现的画面窗口）：左上角 × 按钮右侧悬浮显示"👀 N 人在看"（N = 当前观看该流的总人数，各观众看到的一致）
+- 投屏者的投屏设置面板（sharePop，仅投屏中显示）：新增只读一行"正在观看：小K、阿信"（无人在看 → "暂无"）
+- 不新增"流主预览自己流"的入口（观看视图仍仅观看者可用）
+
+**协议升级（替代 Task 2 的 `ViewerCount { n: u16 }`，type 13 不变）**：
+- `TcpMessage::Viewers { uids: Vec<u16> }`；载荷 = `[count u16][uid u16 × count]`
+- 语义 = 该流当前全部订阅者 uid 列表（含刚订阅者本人；人数 N = `uids.len()`）
+- 收件人 = 流主 + 该流全部订阅者（同内容定向发送）
+- 改动点：`messages.rs`（变体、type_id 注释）、`tcp.rs`（encode/decode 与 roundtrip 样本）
+
+**服务器（Task 4 增量）**：
+- 新增 `Room::viewers_of(target: u16) -> Vec<u16>`（按 uid 升序，保证稳定）
+- 统一触发时机：流 T 的订阅集合任一变化后（Subscribe 新订阅、覆盖切换旧/新目标、Unsubscribe、LeaveGuard 离开、T 的 StreamState 上报初始值）→ 向 `{T} ∪ viewers_of(T)` 每人发送 `Viewers { uids: viewers_of(T) }`
+- 原 `ViewerCount { n }` 的全部发送点按此替换
+
+**客户端 Rust（Task 5 增量）**：
+- 收到 `Viewers { uids }` → `shared.viewer_count.store(uids.len())`（屏幕音频/视频门控语义不变）+ `bridge.emit_viewer_count(uids)`（前端事件 payload = uid 数组）
+
+**前端（Task 9/10 增量）**：
+- `video_view.js`：新增 `setViewerCount(n)`——正在观看时在窗口左上角（× 右侧）显示"👀 N 人在看"；退出/切换观看时清除；双路视图挂主画面窗口
+- `app.js` `listen("viewer_count")`：`const uids = e.payload; videoCapture.setViewerCount(uids.length); videoView.setViewerCount(uids.length); updateShareViewers(uids);`
+- `updateShareViewers(uids)`：缓存最近名单；投屏面板打开时渲染"正在观看：…"（uid → members 昵称表，缺失显示 uid；空数组 → "暂无"）
+- `style.css`：角落徽标（半透明底、小字号）与面板名单行样式
+
+**验收增量（Task 11 验收表追加）**：
+| 11 | B 点 A 的纱 | A 投屏面板显示"正在观看：B"；B 观看视图角落显示"👀 1 人在看" |
+| 12 | C 也看 A；随后 B 退出 | B、C 角落均显示"👀 2 人在看"；A 面板显示"正在观看：B、C"；B 退出后 C 变"👀 1 人在看"、A 面板剩"正在观看：C" |
+
+**执行时机**：协议层升级在 Task 4 开始前完成（作为 Task 4 的 Step 0 或独立小提交）；前端两项随 Task 9/10 原步骤一并实现。
 
 ---
 

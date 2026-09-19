@@ -11,8 +11,8 @@ use echoroom_protocol::{tcp, ROOM_CAPACITY};
 pub struct JoinOk {
     pub uid: u16,
     pub token: u32,
-    /// 加入前已在房间的成员：(uid, 昵称, 是否静音)
-    pub members: Vec<(u16, String, bool)>,
+    /// 加入前已在房间的成员：(uid, 昵称, 是否静音, 流位图)
+    pub members: Vec<(u16, String, bool, u8)>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -25,6 +25,8 @@ pub struct Member {
     pub nickname: String,
     pub token: u32,
     pub muted: bool,
+    /// 流位图：bit0 = 投屏（屏幕）、bit1 = 摄像头
+    pub streams: u8,
     pub tx: Sender<Vec<u8>>, // TCP 发送队列（预编码字节）
     pub udp_addr: Option<SocketAddr>,
     pub last_seen: Instant,
@@ -59,10 +61,10 @@ impl Room {
         if self.members.len() >= ROOM_CAPACITY {
             return Err(JoinErr::Full);
         }
-        let members: Vec<(u16, String, bool)> = self
+        let members: Vec<(u16, String, bool, u8)> = self
             .members
             .values()
-            .map(|m| (m.uid, m.nickname.clone(), m.muted))
+            .map(|m| (m.uid, m.nickname.clone(), m.muted, m.streams))
             .collect();
         let uid = self.next_uid;
         self.next_uid = self.next_uid.wrapping_add(1).max(1);
@@ -74,6 +76,7 @@ impl Room {
                 nickname,
                 token,
                 muted: false,
+                streams: 0,
                 tx,
                 udp_addr: None,
                 last_seen: Instant::now(),
@@ -191,7 +194,7 @@ mod tests {
         assert!(ok1.members.is_empty());
         let (tx2, _r2) = mpsc::channel();
         let ok2 = room.join("B".into(), tx2).unwrap();
-        assert_eq!(ok2.members, vec![(ok1.uid, "A".to_string(), false)]);
+        assert_eq!(ok2.members, vec![(ok1.uid, "A".to_string(), false, 0)]);
         assert!(room.leave(ok1.uid));
         assert!(!room.leave(ok1.uid)); // 再删为 false
     }
@@ -252,6 +255,6 @@ mod tests {
         let (tx2, _r2) = mpsc::channel();
         let b = room.join("B".into(), tx2).unwrap();
         // 后加入者应看到 A 处于静音
-        assert_eq!(b.members, vec![(a.uid, "A".to_string(), true)]);
+        assert_eq!(b.members, vec![(a.uid, "A".to_string(), true, 0)]);
     }
 }
