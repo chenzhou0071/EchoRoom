@@ -37,6 +37,8 @@ pub struct Room {
     next_uid: u16,
     /// 简单确定性伪随机（学习用途：LCG；不引入 rand 依赖）
     rng_state: u64,
+    /// 订阅表：订阅者 uid → 目标 uid（一人最多订阅一人，覆盖式）
+    subscriptions: HashMap<u16, u16>,
 }
 
 impl Room {
@@ -45,7 +47,7 @@ impl Room {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x9E3779B97F4A7C15);
-        Room { members: HashMap::new(), next_uid: 1, rng_state: seed | 1 }
+        Room { members: HashMap::new(), next_uid: 1, rng_state: seed | 1, subscriptions: HashMap::new() }
     }
 
     fn next_token(&mut self) -> u32 {
@@ -86,6 +88,8 @@ impl Room {
     }
 
     pub fn leave(&mut self, uid: u16) -> bool {
+        self.subscriptions.remove(&uid); // 他看别人的记录
+        self.subscriptions.retain(|_, t| *t != uid); // 别人看他的记录
         self.members.remove(&uid).is_some()
     }
 
@@ -99,8 +103,7 @@ impl Room {
         }
     }
 
-    /// 定向发送给指定成员（预留 API，当前主流程未用）
-    #[allow(dead_code)]
+    /// 定向发送给指定成员（流事件 / 观看名单通知）
     pub fn send_to(&self, uid: u16, msg: &TcpMessage) {
         if let Some(m) = self.members.get(&uid) {
             let _ = m.tx.send(tcp::encode(msg));
@@ -159,6 +162,58 @@ impl Room {
             .collect()
     }
 
+    /// 设置某路流的开/停；返回新位图（成员不存在 → None）
+    pub fn set_stream(&mut self, uid: u16, kind: u8, on: bool) -> Option<u8> {
+        let m = self.members.get_mut(&uid)?;
+        let bit = 1u8 << kind;
+        if on {
+            m.streams |= bit;
+        } else {
+            m.streams &= !bit;
+        }
+        Some(m.streams)
+    }
+
+    /// 订阅（覆盖式：直接改写映射）；目标不存在或订阅自己 → false
+    pub fn subscribe(&mut self, sub: u16, target: u16) -> bool {
+        if sub == target || !self.members.contains_key(&target) {
+            return false;
+        }
+        self.subscriptions.insert(sub, target);
+        true
+    }
+
+    /// 解除订阅；返回是否存在被解除的订阅
+    pub fn unsubscribe(&mut self, sub: u16) -> bool {
+        self.subscriptions.remove(&sub).is_some()
+    }
+
+    /// 订阅者 → 目标（离开清理 / 覆盖切换通知用）
+    pub fn subscription_of(&self, sub: u16) -> Option<u16> {
+        self.subscriptions.get(&sub).copied()
+    }
+
+    /// 目标的订阅者 uid 列表（按 uid 升序，内容稳定；"谁在看"名单 R1 用）
+    pub fn viewers_of(&self, target: u16) -> Vec<u16> {
+        let mut v: Vec<u16> = self
+            .subscriptions
+            .iter()
+            .filter(|(_, t)| **t == target)
+            .map(|(s, _)| *s)
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// 目标的订阅者中已注册 UDP 地址的列表（视频/屏幕音频的转发目标）
+    pub fn subscribers_with_udp(&self, target: u16) -> Vec<SocketAddr> {
+        self.subscriptions
+            .iter()
+            .filter(|(_, t)| **t == target)
+            .filter_map(|(s, _)| self.members.get(s)?.udp_addr)
+            .collect()
+    }
+
     /// 按 uid 查昵称（预留 API，当前主流程未用）
     #[allow(dead_code)]
     pub fn nickname(&self, uid: u16) -> Option<String> {
@@ -169,7 +224,7 @@ impl Room {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use echoroom_protocol::messages::TcpMessage;
+    use echoroom_protocol::messages::{TcpMessage, STREAM_CAMERA, STREAM_SCREEN};
     use std::sync::mpsc;
 
     #[test]
@@ -256,5 +311,62 @@ mod tests {
         let b = room.join("B".into(), tx2).unwrap();
         // 后加入者应看到 A 处于静音
         assert_eq!(b.members, vec![(a.uid, "A".to_string(), true, 0)]);
+    }
+
+    #[test]
+    fn stream_bitmap_set_and_join_reports_it() {
+        let mut room = Room::new();
+        let (tx1, _r1) = mpsc::channel();
+        let a = room.join("A".into(), tx1).unwrap();
+        assert_eq!(room.set_stream(a.uid, STREAM_SCREEN, true), Some(1));
+        assert_eq!(room.set_stream(a.uid, STREAM_CAMERA, true), Some(3));
+        assert_eq!(room.set_stream(a.uid, STREAM_SCREEN, false), Some(2));
+        assert_eq!(room.set_stream(999, STREAM_SCREEN, true), None, "成员不存在");
+        let (tx2, _r2) = mpsc::channel();
+        let b = room.join("B".into(), tx2).unwrap();
+        assert_eq!(b.members, vec![(a.uid, "A".to_string(), false, 2)]);
+    }
+
+    #[test]
+    fn subscribe_unsubscribe_and_viewers() {
+        let mut room = Room::new();
+        let (txa, _ra) = mpsc::channel();
+        let (txb, _rb) = mpsc::channel();
+        let a = room.join("A".into(), txa).unwrap();
+        let b = room.join("B".into(), txb).unwrap();
+        let addr_b: std::net::SocketAddr = "127.0.0.1:6001".parse().unwrap();
+        room.set_udp(b.uid, addr_b);
+        assert!(!room.subscribe(b.uid, b.uid), "不能订阅自己");
+        assert!(!room.subscribe(b.uid, 999), "目标不存在");
+        assert!(room.subscribe(b.uid, a.uid));
+        assert_eq!(room.viewers_of(a.uid), vec![b.uid]);
+        assert_eq!(room.subscription_of(b.uid), Some(a.uid));
+        assert_eq!(room.subscribers_with_udp(a.uid), vec![addr_b]);
+        // 覆盖式：C 订阅 A 后再改订阅 B
+        let (txc, _rc) = mpsc::channel();
+        let c = room.join("C".into(), txc).unwrap();
+        assert!(room.subscribe(c.uid, a.uid));
+        assert_eq!(room.viewers_of(a.uid), vec![b.uid, c.uid], "两人在看，按 uid 升序");
+        assert!(room.subscribe(c.uid, b.uid));
+        assert_eq!(room.viewers_of(a.uid), vec![b.uid]);
+        assert_eq!(room.viewers_of(b.uid), vec![c.uid]);
+        assert!(room.unsubscribe(c.uid));
+        assert!(!room.unsubscribe(c.uid), "重复退订为 false");
+        assert!(room.viewers_of(b.uid).is_empty());
+    }
+
+    #[test]
+    fn leave_cleans_subscriptions_both_ways() {
+        let mut room = Room::new();
+        let (txa, _ra) = mpsc::channel();
+        let (txb, _rb) = mpsc::channel();
+        let a = room.join("A".into(), txa).unwrap();
+        let b = room.join("B".into(), txb).unwrap();
+        room.subscribe(b.uid, a.uid); // B 看 A
+        room.subscribe(a.uid, b.uid); // A 看 B（互看）
+        room.leave(b.uid);
+        assert!(room.viewers_of(a.uid).is_empty(), "B 离开后 A 的观众列表清空");
+        assert_eq!(room.subscription_of(a.uid), None, "A 看 B 的订阅记录被清");
+        assert!(!room.unsubscribe(a.uid));
     }
 }

@@ -84,6 +84,39 @@ fn handle_conn(mut stream: TcpStream, room: Arc<Mutex<Room>>) -> std::io::Result
                             // 广播回所有人（含自己）：与 Chat/Speaking 同模式，卡片图标统一由广播驱动
                             room.broadcast(None, &TcpMessage::Muted { uid: ok.uid, on });
                         }
+                        TcpMessage::StreamState { kind, on, .. } => {
+                            let mut room = room.lock().unwrap();
+                            if room.set_stream(ok.uid, kind, on).is_some() {
+                                room.broadcast(None, &TcpMessage::StreamState { uid: ok.uid, kind, on });
+                                // 流开/停时同步最新观看名单（R1；0 人在看 → 空列表）
+                                notify_viewers(&mut room, ok.uid);
+                            }
+                        }
+                        TcpMessage::Subscribe { target, .. } => {
+                            let mut room = room.lock().unwrap();
+                            // 覆盖式：切换订阅前先刷新旧目标的名单
+                            if let Some(old) = room.subscription_of(ok.uid) {
+                                room.unsubscribe(ok.uid);
+                                if old != target {
+                                    notify_viewers(&mut room, old);
+                                }
+                            }
+                            if room.subscribe(ok.uid, target) {
+                                notify_viewers(&mut room, target);
+                            }
+                        }
+                        TcpMessage::Unsubscribe { .. } => {
+                            let mut room = room.lock().unwrap();
+                            if let Some(old) = room.subscription_of(ok.uid) {
+                                room.unsubscribe(ok.uid);
+                                notify_viewers(&mut room, old);
+                            }
+                        }
+                        TcpMessage::RequestKeyframe { target, .. } => {
+                            let room = room.lock().unwrap();
+                            // 转发给目标（uid 替换为请求者，供流主识别）
+                            room.send_to(target, &TcpMessage::RequestKeyframe { uid: ok.uid, target });
+                        }
                         _ => {}
                     }
                 }
@@ -145,9 +178,24 @@ struct LeaveGuard {
 impl Drop for LeaveGuard {
     fn drop(&mut self) {
         let mut room = self.room.lock().unwrap_or_else(|e| e.into_inner()); // 锁 poisoned 时也尽力清理
+        // 离开者若正在观看别人：先取出目标，离开后刷新该目标名单（R1）
+        let watching = room.subscription_of(self.uid);
         if room.leave(self.uid) {
             room.broadcast(None, &TcpMessage::MemberLeave { uid: self.uid });
             println!("[tcp] {}(uid={}) 离开", self.nickname, self.uid);
         }
+        if let Some(target) = watching {
+            notify_viewers(&mut room, target);
+        }
+    }
+}
+
+/// R1：向流主与该流全部订阅者发送最新观看名单（同一份内容；无人看时流主收到空列表）
+fn notify_viewers(room: &mut Room, target: u16) {
+    let uids = room.viewers_of(target);
+    let msg = TcpMessage::Viewers { uids: uids.clone() };
+    room.send_to(target, &msg);
+    for uid in uids {
+        room.send_to(uid, &msg);
     }
 }

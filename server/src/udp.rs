@@ -72,8 +72,38 @@ pub fn spawn_udp_loop(port: u16, room: Arc<Mutex<Room>>) {
                 UdpPacket::RegisterAck | UdpPacket::RegisterReject => {
                     // 服务器不应收到这两个方向；忽略
                 }
-                UdpPacket::VideoChunk { .. } | UdpPacket::ScreenAudio { .. } => {
-                    // 视频/屏幕声音转发逻辑随 Task 4 实现（当前先忽略）
+                UdpPacket::VideoChunk { kind, flags, frame_seq, chunk_idx, chunk_count, data } => {
+                    let (real_uid, targets) = {
+                        let mut room = room.lock().unwrap();
+                        let Some(real_uid) = room.member_by_addr(from) else {
+                            continue;
+                        };
+                        room.touch(real_uid);
+                        (real_uid, room.subscribers_with_udp(real_uid))
+                    };
+                    // 只发给订阅者；uid 用反查值（防伪造）
+                    let out = udp::encode(
+                        real_uid,
+                        frame_seq as u32,
+                        &UdpPacket::VideoChunk { kind, flags, frame_seq, chunk_idx, chunk_count, data },
+                    );
+                    for t in targets {
+                        let _ = socket.send_to(&out, t);
+                    }
+                }
+                UdpPacket::ScreenAudio { opus } => {
+                    let (real_uid, targets) = {
+                        let mut room = room.lock().unwrap();
+                        let Some(real_uid) = room.member_by_addr(from) else {
+                            continue;
+                        };
+                        room.touch(real_uid);
+                        (real_uid, room.subscribers_with_udp(real_uid))
+                    };
+                    let out = udp::encode(real_uid, 0, &UdpPacket::ScreenAudio { opus });
+                    for t in targets {
+                        let _ = socket.send_to(&out, t);
+                    }
                 }
             }
         }
