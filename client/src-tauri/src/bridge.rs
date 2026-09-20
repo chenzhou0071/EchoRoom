@@ -190,6 +190,18 @@ pub fn set_peer_gain(app: AppHandle, state: State<AppState>, nickname: String, g
     let _ = app.emit("volume", volume_json(&state));
 }
 
+/// 观看端：投屏（屏幕）声音的播放增益（0.0–2.0）；无需事件回传，前端持有滑块真值
+#[tauri::command]
+pub fn set_screen_gain(state: State<AppState>, gain: f32) {
+    let g = gain.clamp(0.0, 2.0);
+    state
+        .shared
+        .screen_gain
+        .store(g.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    state.config.lock().unwrap().screen_gain = g;
+    persist(&state);
+}
+
 /// 登录成功后：停旧音频管线，按新 uid/token/服务器地址启动（失败不影响文字聊天）。
 /// `tcp_tx` 供采集线程上报说话状态（VAD）。
 pub fn start_audio(

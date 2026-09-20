@@ -3304,7 +3304,7 @@ document.addEventListener("click", (e) => {
 - Consumes: Task 1–10 的全部产出
 - Produces: 无临时物、全绿、可交付的 B 子项目
 
-- [ ] **Step 1: 全量测试与构建**
+- [x] **Step 1: 全量测试与构建**
 
 Run: `cargo test; cargo build`
 （工作目录 `E:\pro\EchoRoom`；PowerShell 用 `;` 分隔）
@@ -3315,7 +3315,8 @@ Expected:
 - `echoroom-client`：FrameAssembler 四个测试、立体声 Opus roundtrip、config 新旧字段测试全绿
 - workspace 编译通过
 
-- [ ] **Step 2: 端到端验收（双客户端 + 服务器）**
+- [x] **Step 2: 端到端验收（双客户端 + 服务器）**
+> 执行注（2026-09-20）：以真实双人实测替代本表（两轮反馈 R3/R4 已修复并复验）。
 
 准备：本机 `cargo run -p echoroom-server`；客户端 A = 另一台机器或打包版（同机双开 dev 会共享配置目录，勿同机同模式双开）；客户端 B = `cargo tauri dev`。
 
@@ -3332,19 +3333,21 @@ Expected:
 | 9 | A 系统共享条"停止共享" | A 按钮复原、面板自动关闭；B 观看视图自动退出；A 重开投屏后 B 重看正常 |
 | 10 | 断线重连 | 停服务器 5 秒再启：双方"重连中…"→"已连接"；B 观看自动退出；A 仍在投屏时按钮保持蓝色，恢复后其他端重新看到角标；B 重新点纱可秒开画面 |
 
-- [ ] **Step 3: 清理 spike 临时物**
+- [x] **Step 3: 清理 spike 临时物**
+> 执行注（2026-09-20）：实删 = `spike.html`、`spike.js`、`screen_probe.rs`、`probe_min.rs`（后两个中 probe_min 为计划后新增的最小复现）；lib.rs 删除 = `spike_echo`/`spike_feed`/`spike_minimize`/`spike_min_check` 四个命令与注册（后两个为计划后新增）及 `use tauri::Manager` 导入；`spike_probe.wav` 不存在，无需处理。
 
 1. 删除三个临时文件（见 Files 节）
 2. `lib.rs`：删除 `spike_echo`/`spike_feed` 两个函数（含 `// --- 临时 spike 命令（Task 11 删除）---` 注释块）与 `invoke_handler` 中的两行注册
 3. 若 `client/src-tauri/spike_probe.wav` 存在一并删除
 4. 保留项：client 的 `windows` crate 依赖（Task 7 的 screen_capture.rs 依赖）、tauri.conf.json 的反节流 flags（投屏后台保活依赖）
 
-- [ ] **Step 4: 清理后回归**
+- [x] **Step 4: 清理后回归**
+> 执行注（2026-09-20）：`cargo test` 49 项全绿（client 29 / protocol 11 / server 9）；`cargo tauri build` 零警告产出 0.1.2。
 
 Run: `cargo test; cargo build`
 Expected: 全绿；`cargo tauri dev` 能启动，投屏/观看入口仍在（无对 spike 的残留引用）
 
-- [ ] **Step 5: 完成清单确认**
+- [x] **Step 5: 完成清单确认**
 
 - 发送端：投屏（档位/系统声音/停止面板）+ 摄像头（直接开关）；无人观看不编码
 - 观看端：纱入口 → 单路主画面 / 双路主+小窗（拖移、缩放、全屏）；关键帧请求秒开
@@ -3414,4 +3417,45 @@ Expected: 全绿；`cargo tauri dev` 能启动，投屏/观看入口仍在（无
 | 15 | 预览中点右下角 ⚙ | 打开投屏设置面板；切档位/关系统声音效果与既有验收一致；停止投屏后面板与预览一并退出 |
 
 **执行时机**：随 Task 9/10 原步骤一并实现。
+
+---
+
+### R3（2026-09-19）：投屏面板摄像头控制 + 预览即显示 ⚙（随 1689be8 交付）
+
+**需求（用户确认）**：进入自预览后卡片被覆盖，摄像头按钮不可达。
+- 投屏设置面板拆为「投屏 / 摄像头」两区：摄像头开关按钮（开启=蓝、关闭=红）
+- 预览视图右下角 ⚙ 改为任一单路（投屏或摄像头）预览即显示；面板「停止投屏」上下文化（未投屏时同一按钮 =「开启投屏」）
+- 两路全停（预览退出）才自动收起面板；新增 `clampSharePop()` 防面板底边越出视口
+
+---
+
+### R4（2026-09-20）：双人实测反馈一轮（8 条）
+
+**需求（用户实测确认，含 1 处澄清）**：
+1. 全屏按钮无效且应在右下角最右（实为 capability 缺 `core:window:allow-set-fullscreen`；位置原在右上角）
+2. 观看端可调「被看投屏的系统声音」音量——按钮在视图右下角 ⛶ 左侧（0–200%，持久化 `screen_gain`）
+3. 投屏面板新增「切换投屏窗口」（重开系统选择器换源）
+4. 面板观看名单从「正在观看：」下一行开始（`span` 改块级）
+5. 观看视图左下角显示「宽×高 · Nfps」实测徽标
+6. 预览左上角 × 改为「←返回」：退出视图但投屏继续（可去看别人的投屏）
+7. 预览左下角新增红字「停止投屏」＝全关（投屏 + 摄像头一并停止，视图退出；用户澄清后修正）
+8. 澄清后与 6 合并：不另加右下角关闭按钮（用户选「只要左上返回」）
+
+**实现要点**：
+- `capabilities/default.json`：permissions 增 `core:window:allow-set-fullscreen`（Tauri 默认权限不含窗口写操作）
+- Rust：`config.screen_gain`（serde default 1.0，持久化）→ `SharedAudio.screen_gain`（AtomicU32）→ 混音 `add_scaled` 用该增益（原固定 1.0）；新命令 `set_screen_gain`（clamp 0–2）
+- `video_capture.js`：新增 `switchScreen()`——新流就位后原子替换会话（不报 off/on，观众端由新 IDR 续播）；旧流 ended 监听加会话守卫防误杀；预览换源由调用方 `videoView.preview(0, 新流)` 就地替换
+- `video_view.js`：`refreshButtons` 统一角落控件显隐/文案；`view-close` 两种模式都走 `end()`（预览=返回）；解码输出计数 + 每秒刷新统计徽标；`toggleFullscreen` 加 try/catch；暴露 `isPreviewing`
+- `app.js`：投屏音量弹层（复用 `.vol-pop` 样式、与成员音量面板互斥）；`#sp-switch` 处理器；`screenGain` 初值取自 `get_config`
+- `style.css`：⛶ 移右下角最右（`bottom:10`）；`[音量][⛶]`（观看）/`[⚙]`（预览）按钮位；`.view-stop`/`.view-stats`；小窗 `bottom` 统一 56px 让位右下按钮；`.sp-switch` 幽灵按钮
+
+**验收增量（Task 11 验收表追加；16–21）**：
+| 16 | 观看中点击 ⛶ | 窗口全屏；再点恢复正常 |
+| 17 | 观看中拖动投屏音量滑杆 | 被看投屏的系统声音实时变化；重启客户端后仍为上次值 |
+| 18 | 投屏中面板点「切换投屏窗口」 | 选择新窗口后：预览就地切换；观众端 1–2 秒内切到新画面且不掉线退出 |
+| 19 | 打开投屏面板 | 「正在观看：」后名字从下一行开始（多人时逐行回绕） |
+| 20 | 观看他人投屏 | 左下角显示「宽×高 · Nfps」，随分辨率/帧率变化刷新 |
+| 21 | 预览点左上「←返回」 | 退出预览、投屏继续；点他人纱可直接观看；左下「停止投屏」= 全关（投屏+摄像头一并停止，视图退出） |
+
+**执行时机**：2026-09-20 反馈当日实现并构建；主程序命名统一为 `Echo.exe`（Cargo `[[bin]]`/`default-run` 与 `mainBinaryName` 同改，安装包随版本升为 0.1.2）。
 

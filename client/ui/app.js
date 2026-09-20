@@ -203,6 +203,7 @@ const volSlider = volPop.querySelector('input[type="range"]');
 let volTarget = null; // { uid, nickname } 当前面板目标
 
 function openVolPop(anchor, uid, nickname) {
+  closeScreenVolPop(); // R4：与投屏音量面板互斥
   volTarget = { uid, nickname };
   const cur = uid === myUid ? volState.self_gain : (volState.peer_gains[nickname] ?? 1.0);
   volSlider.value = String(Math.round(cur * 100));
@@ -248,6 +249,48 @@ volSlider.addEventListener("input", () => {
   }
 });
 
+// ---- R4：投屏（屏幕）音量弹出面板（观看端；单例，样式复用 .vol-pop） ----
+el("view-vol").innerHTML = ICONS.volume;
+const screenVolPop = document.createElement("div");
+screenVolPop.className = "vol-pop screen-vol-pop";
+screenVolPop.innerHTML = '<div class="val"></div><input type="range" min="0" max="200" step="1" />';
+document.body.appendChild(screenVolPop);
+const screenVolVal = screenVolPop.querySelector(".val");
+const screenVolSlider = screenVolPop.querySelector('input[type="range"]');
+let screenGain = 1.0; // Rust config 为真值，本地副本供弹层回显
+
+function openScreenVolPop(anchor) {
+  closeVolPop(); // 互斥：收掉成员音量面板
+  screenVolSlider.value = String(Math.round(screenGain * 100));
+  screenVolVal.textContent = screenVolSlider.value + "%";
+  const r = anchor.getBoundingClientRect();
+  screenVolPop.classList.add("show");
+  const w = screenVolPop.offsetWidth;
+  const h = screenVolPop.offsetHeight;
+  const left = Math.min(r.left, window.innerWidth - w - 8);
+  let top = r.bottom + 6;
+  if (top + h > window.innerHeight - 8) top = r.top - h - 6;
+  screenVolPop.style.left = left + "px";
+  screenVolPop.style.top = top + "px";
+}
+
+function closeScreenVolPop() {
+  screenVolPop.classList.remove("show");
+}
+
+el("view-vol").addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (screenVolPop.classList.contains("show")) closeScreenVolPop();
+  else openScreenVolPop(e.currentTarget);
+});
+
+screenVolSlider.addEventListener("input", () => {
+  screenVolVal.textContent = screenVolSlider.value + "%";
+  const gain = Number(screenVolSlider.value) / 100;
+  screenGain = gain;
+  invoke("set_screen_gain", { gain }).catch((e) => console.error("设置投屏音量失败:", e));
+});
+
 // ---- 设置面板：投屏 + 摄像头（单例；预览视图右下角 ⚙ 或投屏中卡片按钮开关） ----
 const sharePop = document.createElement("div");
 sharePop.className = "share-pop";
@@ -259,6 +302,7 @@ sharePop.innerHTML = `
     <label class="sp-row"><input type="radio" name="sp-quality" value="1080p30" />1080p 30fps</label>
     <label class="sp-row"><input type="checkbox" id="sp-audio" />共享系统声音<span class="sp-hint" id="sp-audio-hint"></span></label>
     <div class="sp-viewers">正在观看：<span id="sp-viewers">暂无</span></div>
+    <button class="sp-switch" id="sp-switch">切换投屏窗口</button>
   </div>
   <button class="sp-stop" id="sp-stop">停止投屏</button>
   <div class="sp-sep"></div>
@@ -341,6 +385,15 @@ sharePop.querySelector("#sp-audio").addEventListener("change", (e) => {
   invoke("set_share_audio", { on: shareAudioOn }).catch((e) => console.error("切换共享声音失败:", e));
 });
 
+// R4：切换投屏源（重开系统选择器；观众不掉线——服务器流状态不变，预览就地换源）
+sharePop.querySelector("#sp-switch").addEventListener("click", async () => {
+  const ok = await videoCapture.switchScreen();
+  if (!ok) return; // 取消选择：保留原流
+  if (videoView.isPreviewing) {
+    videoView.preview(videoCapture.STREAM_SCREEN, videoCapture.getStream(videoCapture.STREAM_SCREEN));
+  }
+});
+
 sharePop.querySelector("#sp-stop").addEventListener("click", async () => {
   if (videoCapture.isActive(videoCapture.STREAM_SCREEN)) {
     closeSharePop();
@@ -380,6 +433,7 @@ document.getElementById("view-settings").addEventListener("click", (e) => {
 
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".vol-pop") && !e.target.closest(".mbtn-vol")) closeVolPop();
+  if (!e.target.closest(".screen-vol-pop") && !e.target.closest("#view-vol")) closeScreenVolPop();
   if (!e.target.closest(".share-pop") && !e.target.closest(".mbtn-screen")) closeSharePop();
 });
 
@@ -564,6 +618,7 @@ async function init() {
   const cfg = await invoke("get_config");
   // 音量真值来自 Rust（config 持久化）：初始化本地副本
   volState = { self_gain: cfg.self_gain, muted: cfg.muted, peer_gains: cfg.peer_gains };
+  screenGain = cfg.screen_gain ?? 1.0; // R4：投屏音量（观看端）
   // B：投屏配置（档位应用给采集模块；声音开关/平台能力供面板显示）
   shareQuality = cfg.share_quality || "720p30";
   videoCapture.setQuality(shareQuality);

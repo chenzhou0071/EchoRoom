@@ -126,8 +126,10 @@ window.videoCapture = (() => {
       return;
     }
     await startPipeline(STREAM_SCREEN, stream);
-    // 用户从系统共享条点"停止共享"
-    stream.getVideoTracks()[0].addEventListener("ended", () => stop(STREAM_SCREEN));
+    // 用户从系统共享条点"停止共享"（守卫：只停当前会话——切换源后旧流的监听不得误杀新会话）
+    stream.getVideoTracks()[0].addEventListener("ended", () => {
+      if (sessions.get(STREAM_SCREEN)?.stream === stream) stop(STREAM_SCREEN);
+    });
     await invoke("report_stream", { kind: STREAM_SCREEN, on: true }).catch(() => {});
     await invoke("set_share_active", { active: true }).catch(() => {});
   }
@@ -145,6 +147,37 @@ window.videoCapture = (() => {
     }
     await startPipeline(STREAM_CAMERA, stream);
     await invoke("report_stream", { kind: STREAM_CAMERA, on: true }).catch(() => {});
+  }
+
+  // R4：切换投屏源——重开系统选择器选择新窗口/应用；新流就位后原子替换会话。
+  // 不报 off/on：服务器流状态保持，观众端由新码流首帧 IDR 无缝续播；预览由调用方就地换源。
+  async function switchScreen() {
+    const old = sessions.get(STREAM_SCREEN);
+    if (!old) return false;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: 30 } },
+        audio: false,
+      });
+    } catch (e) {
+      console.warn("[video] 切换投屏源取消/失败:", e.message);
+      return false; // 保留原流
+    }
+    sessions.delete(STREAM_SCREEN);
+    old.stopped = true;
+    try {
+      await old.reader.cancel();
+    } catch {}
+    try {
+      old.encoder.close();
+    } catch {}
+    old.stream.getTracks().forEach((t) => t.stop());
+    await startPipeline(STREAM_SCREEN, stream);
+    stream.getVideoTracks()[0].addEventListener("ended", () => {
+      if (sessions.get(STREAM_SCREEN)?.stream === stream) stop(STREAM_SCREEN);
+    });
+    return true;
   }
 
   async function stop(kind) {
@@ -192,6 +225,7 @@ window.videoCapture = (() => {
     STREAM_CAMERA,
     startScreen,
     startCamera,
+    switchScreen,
     stop,
     setQuality,
     forceKeyframe,

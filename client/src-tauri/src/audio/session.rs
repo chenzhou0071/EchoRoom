@@ -24,6 +24,8 @@ pub struct SharedAudio {
     pub self_muted: Arc<AtomicBool>,
     /// 对他人的播放增益（按昵称）
     pub peer_gains: Arc<std::sync::Mutex<HashMap<String, f32>>>,
+    /// 观看端：投屏（屏幕）声音的播放增益（f32 bits 存于 AtomicU32）
+    pub screen_gain: Arc<AtomicU32>,
     /// uid → 昵称（网络线程维护；播放端按 uid 查增益）
     pub uid_names: Arc<std::sync::Mutex<HashMap<u16, String>>>,
     /// 本端流位图镜像（bit0 = 投屏、bit1 = 摄像头；重连补报用）
@@ -33,11 +35,17 @@ pub struct SharedAudio {
 }
 
 impl SharedAudio {
-    pub fn new(self_gain: f32, muted: bool, peer_gains: HashMap<String, f32>) -> Self {
+    pub fn new(
+        self_gain: f32,
+        muted: bool,
+        peer_gains: HashMap<String, f32>,
+        screen_gain: f32,
+    ) -> Self {
         SharedAudio {
             self_gain: Arc::new(AtomicU32::new(self_gain.to_bits())),
             self_muted: Arc::new(AtomicBool::new(muted)),
             peer_gains: Arc::new(std::sync::Mutex::new(peer_gains)),
+            screen_gain: Arc::new(AtomicU32::new(screen_gain.to_bits())),
             uid_names: Arc::new(std::sync::Mutex::new(HashMap::new())),
             my_streams: Arc::new(AtomicU8::new(0)),
             viewer_count: Arc::new(AtomicU16::new(0)),
@@ -221,6 +229,7 @@ pub fn spawn_audio_pipeline(
     let mut scr_buf: std::collections::VecDeque<i16> = std::collections::VecDeque::new();
     let peer_gains = shared.peer_gains.clone();
     let uid_names = shared.uid_names.clone();
+    let screen_gain = shared.screen_gain.clone();
     let player = crate::audio::playback::spawn_player(move |out| {
         // 收流：每发送者独立抖动缓冲
         while let Ok((uid, seq, opus)) = rx_voice.try_recv() {
@@ -308,11 +317,11 @@ pub fn spawn_audio_pipeline(
                     got += n;
                 }
             }
-            // 屏幕声音叠加（固定 1.0 增益；所有输出段共用同一队列）
+            // 屏幕声音叠加（观看端可调增益；所有输出段共用同一队列）
             let avail = scr_buf.len().min(want);
             if avail > 0 {
                 let seg: Vec<i16> = scr_buf.drain(..avail).collect();
-                acc.add_scaled(&seg, 1.0);
+                acc.add_scaled(&seg, f32::from_bits(screen_gain.load(Ordering::Relaxed)));
             }
             acc.finalize(&mut scratch[..want]);
             out[filled..filled + want].copy_from_slice(&scratch[..want]);

@@ -331,7 +331,7 @@ body {
   position: absolute;
   z-index: 2; /* 固定浮于主画面之上（与 DOM 插入顺序无关） */
   right: 12px;
-  bottom: 12px;
+  bottom: 56px; /* R4：让位右下角按钮（观看 [音量][⛶] / 预览 ⚙） */
   width: 176px;
   height: auto;
   border-radius: 6px;
@@ -373,21 +373,46 @@ body {
   font-size: 12px;
   z-index: 21;
 }
+/* R4：⛶ 由右上移至右下角最右（音量按钮在其左侧） */
 .view-fs {
   right: 10px;
-  top: 10px;
+  bottom: 10px;
 }
 .view-fs.on {
   background: #3b82f6;
 }
-/* R2/R3：预览模式右下角 ⚙（替代 ⛶ 的位置；预览即显示——投屏或摄像头单路均可，由 JS 控制） */
+/* R4：观看视图右下角投屏音量（位于 ⛶ 左侧） */
+.view-vol {
+  right: 50px;
+  bottom: 10px;
+}
+/* R2/R3：预览模式右下角 ⚙（预览即显示——投屏或摄像头单路均可，由 JS 控制） */
 .view-settings {
   right: 10px;
   bottom: 10px;
 }
-/* R2：预览时摄像头小窗上移，避让右下角 ⚙ */
-#view.preview .view-canvas.pip {
-  bottom: 56px;
+/* R4：预览左下角「停止投屏」（红字文本按钮，宽度自适应） */
+.view-stop {
+  left: 10px;
+  bottom: 10px;
+  width: auto;
+  padding: 0 12px;
+  color: var(--err);
+  font-size: 12px;
+}
+/* R4：观看左下角「宽×高 · Nfps」实测徽标 */
+.view-stats {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  height: 28px;
+  line-height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.7);
+  color: #e2e8f0;
+  font-size: 12px;
+  z-index: 21;
 }
 /* R2：预览 <video> 等比完整显示 */
 video.view-canvas {
@@ -454,7 +479,20 @@ video.view-canvas {
 }
 .share-pop .sp-hint { font-size: 11px; color: var(--err); }
 .share-pop .sp-viewers { font-size: 12px; color: var(--text-dim); }
-.share-pop .sp-viewers span { color: #cbd0dc; }
+/* R4：名字换行显示（"正在观看：" 独立一行，名单从下一行开始） */
+.share-pop .sp-viewers span { display: block; color: #cbd0dc; }
+/* R4：切换投屏窗口（次级按钮：幽灵描边样式） */
+.share-pop .sp-switch {
+  margin-top: 2px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: #cbd0dc;
+  font-size: 12px;
+  cursor: pointer;
+}
+.share-pop .sp-switch:hover { background: rgba(148, 163, 184, 0.12); }
 .share-pop .sp-stop {
   margin-top: 2px;
   padding: 6px;

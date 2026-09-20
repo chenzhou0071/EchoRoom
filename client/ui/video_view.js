@@ -1,7 +1,7 @@
 // 观看视图：Rust 下行帧 → VideoDecoder（每路独立）→ canvas。
 // 预览模式（R2）：本地采集流 → <video> 直接渲染（不经服务器，0 延迟）。
 // 单路：高 230px 按比例居中；双路：投屏主画面 + 摄像头右下角小窗（可拖可缩、比例锁死）。
-// 容器：#view（覆盖 #members 区域）内 #view-stage / #view-close / #view-fs / #view-settings / #view-viewers。
+// 容器：#view（覆盖 #members 区域）内 #view-stage 与角落控件（R4 显隐/文案见 refreshButtons）。
 window.videoView = (() => {
   const { invoke, Channel } = window.__TAURI__.core;
   const STREAM_SCREEN = 0;
@@ -17,6 +17,8 @@ window.videoView = (() => {
   const decoders = {}; // kind → VideoDecoder
   const canvases = {}; // kind → canvas（观看模式）
   const previewVideos = {}; // kind → <video>（预览模式；srcObject = 本地采集流）
+  let statTimer = null; // R4：观看端左下角「分辨率×帧率」采样定时器
+  const statN = { 0: 0, 1: 0 }; // kind → 本采样周期内解码帧数
 
   const stage = () => document.getElementById("view-stage");
   const viewEl = () => document.getElementById("view");
@@ -39,6 +41,7 @@ window.videoView = (() => {
           canvas.height = frame.displayHeight;
         }
         canvas.getContext("2d").drawImage(frame, 0, 0, canvas.width, canvas.height);
+        statN[kind]++; // R4：统计采样
         frame.close();
       },
       error: (e) => {
@@ -162,12 +165,49 @@ window.videoView = (() => {
     if (show) el.textContent = n + " 人在看";
   }
 
-  // R2/R3：右下角按钮显隐——观看=⛶；预览即显示 ⚙（投屏/摄像头单路均可；#view.preview 同时控制小窗避让样式）
+  // R4：观看端左下角「宽×高 · Nfps」徽标——每秒统计一次主画面的解码帧数与画布尺寸
+  function tickStats() {
+    const badge = document.getElementById("view-stats");
+    const mainKind = canvases[STREAM_SCREEN] ? STREAM_SCREEN : canvases[STREAM_CAMERA] ? STREAM_CAMERA : null;
+    if (mainKind === null) {
+      badge.hidden = true;
+      return;
+    }
+    const c = canvases[mainKind];
+    const fps = statN[mainKind];
+    statN[STREAM_SCREEN] = 0;
+    statN[STREAM_CAMERA] = 0;
+    badge.textContent = `${c.width}×${c.height} · ${fps}fps`;
+    badge.hidden = false;
+  }
+
+  function startStats() {
+    statN[STREAM_SCREEN] = 0;
+    statN[STREAM_CAMERA] = 0;
+    if (statTimer) clearInterval(statTimer);
+    statTimer = setInterval(tickStats, 1000);
+  }
+
+  function stopStats() {
+    if (statTimer) {
+      clearInterval(statTimer);
+      statTimer = null;
+    }
+    document.getElementById("view-stats").hidden = true;
+  }
+
+  // R2/R3/R4：角落按钮显隐与文案——观看=×退订 + 左下统计 + 右下 [音量][⛶]；
+  // 预览=←返回（退出视图但投屏继续）+ 左下「停止投屏」+ 右下 ⚙（#view.preview 同时控制小窗避让样式）
   function refreshButtons() {
     const isPreview = mode === "preview";
     viewEl().classList.toggle("preview", isPreview);
+    const closeBtn = document.getElementById("view-close");
+    closeBtn.textContent = isPreview ? "←" : "×";
+    closeBtn.title = isPreview ? "返回（投屏继续）" : "关闭";
+    document.getElementById("view-vol").hidden = isPreview;
     document.getElementById("view-fs").hidden = isPreview;
     document.getElementById("view-settings").hidden = !isPreview;
+    document.getElementById("view-stop-share").hidden = !(isPreview && !!previewVideos[STREAM_SCREEN]);
   }
 
   async function watch(uid) {
@@ -187,6 +227,7 @@ window.videoView = (() => {
     viewEl().hidden = false;
     refreshButtons();
     setViewerCount(lastViewers); // 视图刚显示：重评估徽标
+    startStats(); // R4：左下角统计开始采样
     // 秒开：立即请求关键帧；1.5s 内未收到任何关键帧则重试（最多 3 次）
     requestKey();
     let tries = 0;
@@ -206,6 +247,8 @@ window.videoView = (() => {
       clearInterval(keyTimer);
       keyTimer = null;
     }
+    stopStats(); // R4：统计停止并收起徽标
+    window.closeScreenVolPop?.(); // R4：投屏音量弹层随视图一起收
     const wasWatch = mode === "watch";
     mode = null;
     watchingUid = null;
@@ -299,24 +342,28 @@ window.videoView = (() => {
   }
 
   async function toggleFullscreen() {
-    const w = window.__TAURI__.window.getCurrentWindow();
-    const cur = await w.isFullscreen();
-    await w.setFullscreen(!cur);
-    document.getElementById("view-fs").classList.toggle("on", !cur);
+    try {
+      const w = window.__TAURI__.window.getCurrentWindow();
+      const cur = await w.isFullscreen();
+      await w.setFullscreen(!cur);
+      document.getElementById("view-fs").classList.toggle("on", !cur);
+    } catch (e) {
+      console.warn("[view] 全屏切换失败:", e);
+    }
   }
 
   // 按钮接线（DOM 已在 body 尾部就绪）
   document.getElementById("view-close").addEventListener("click", () => {
-    if (mode === "preview") {
-      // R2：× = 停止共享（单路停那路；双路全部停止；视图退出由停止流程驱动）
-      const vc = window.videoCapture;
-      if (vc?.isActive(STREAM_SCREEN)) vc.stop(STREAM_SCREEN);
-      if (vc?.isActive(STREAM_CAMERA)) vc.stop(STREAM_CAMERA);
-    } else {
-      end(); // 观众：退订退出
-    }
+    end(); // R4：预览=「返回」（退出视图，投屏继续，可去看别人的投屏）；观看=退订退出
   });
   document.getElementById("view-fs").addEventListener("click", () => toggleFullscreen());
+  // R4：预览左下角「停止投屏」= 全关（投屏 + 摄像头一并停止，视图随流停止退出）
+  document.getElementById("view-stop-share").addEventListener("click", async () => {
+    const vc = window.videoCapture;
+    if (!vc) return;
+    if (vc.isActive(STREAM_SCREEN)) await vc.stop(STREAM_SCREEN);
+    if (vc.isActive(STREAM_CAMERA)) await vc.stop(STREAM_CAMERA);
+  });
   // #view-settings（⚙）点击由 app.js 接线打开投屏设置面板（Task 10）
 
   return {
@@ -329,6 +376,9 @@ window.videoView = (() => {
     toggleFullscreen,
     get watchingUid() {
       return watchingUid;
+    },
+    get isPreviewing() {
+      return mode === "preview";
     },
   };
 })();
