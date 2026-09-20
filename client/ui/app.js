@@ -51,21 +51,34 @@ function buildCard(uid, m) {
   const avatar = document.createElement("div");
   avatar.className = "member-avatar";
   avatar.innerHTML = ICONS.avatar;
-  // 他人正在直播：纱（中央播放按钮，再点退出观看）+ 角标
-  if (!isSelf && m.streams) {
+  // 直播中的纱（中央播放按钮）：他人=观看对方流（再点退出）；自己=回到自预览（R5）
+  if (m.streams) {
     const veil = document.createElement("div");
     veil.className = "member-veil";
     const watch = document.createElement("button");
     watch.className = "watch-btn";
-    watch.title = "观看";
+    watch.title = isSelf ? "自预览" : "观看";
     watch.innerHTML = ICONS.play;
     watch.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (videoView.watchingUid === uid) videoView.end();
-      else videoView.watch(uid);
+      if (isSelf) {
+        if (videoView.isPreviewing) {
+          videoView.end();
+          return;
+        }
+        // R8：全部活跃流一起进自预览（投屏主画面 + 摄像头小窗）
+        enterSelfPreview();
+      } else if (videoView.watchingUid === uid) {
+        videoView.end();
+      } else {
+        videoView.watch(uid);
+      }
     });
     veil.appendChild(watch);
     avatar.appendChild(veil);
+  }
+  // 他人直播角标（自己的状态由卡片按钮颜色体现）
+  if (!isSelf && m.streams) {
     const badge = document.createElement("div");
     badge.className = "member-badge";
     badge.textContent = m.streams === 3 ? "投屏+摄像头" : m.streams & 1 ? "投屏中" : "摄像头中";
@@ -131,9 +144,7 @@ function buildCard(uid, m) {
         // 未投屏：起投屏（系统选择器）→ 成功即自动进入自预览（R2；不自动弹面板）
         await videoCapture.startScreen();
         renderMembers(); // 重建卡片（旧节点已脱离 DOM，不能用作定位锚点）
-        if (videoCapture.isActive(videoCapture.STREAM_SCREEN)) {
-          videoView.preview(videoCapture.STREAM_SCREEN, videoCapture.getStream(videoCapture.STREAM_SCREEN));
-        }
+        if (videoCapture.isActive(videoCapture.STREAM_SCREEN)) enterSelfPreview(); // R8：连同另一路活跃流一起进
       }
     });
     btns.appendChild(screenBtn);
@@ -149,9 +160,7 @@ function buildCard(uid, m) {
         await videoCapture.stop(videoCapture.STREAM_CAMERA); // 预览退出由流停止逻辑驱动（R2）
       } else {
         await videoCapture.startCamera();
-        if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) {
-          videoView.preview(videoCapture.STREAM_CAMERA, videoCapture.getStream(videoCapture.STREAM_CAMERA));
-        }
+        if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) enterSelfPreview(); // R8：连同另一路活跃流一起进
       }
       renderMembers();
     });
@@ -335,6 +344,15 @@ function clampSharePop() {
   }
 }
 
+// R8：进入自预览——把当前所有活跃本地流逐路挂进视图（screen 主画面 + camera 小窗）。
+// 修复「先开一路 → ←返回 → 再开另一路」只挂新流、另一路不显示的问题
+function enterSelfPreview() {
+  const sc = videoCapture.getStream(videoCapture.STREAM_SCREEN);
+  if (sc) videoView.preview(videoCapture.STREAM_SCREEN, sc);
+  const cm = videoCapture.getStream(videoCapture.STREAM_CAMERA);
+  if (cm) videoView.preview(videoCapture.STREAM_CAMERA, cm);
+}
+
 // R3：面板按流状态刷新——未投屏时投屏区只留"开启投屏"按钮；两路按钮文案随开关状态
 function syncSharePop() {
   const screenOn = videoCapture.isActive(videoCapture.STREAM_SCREEN);
@@ -362,7 +380,8 @@ function openSharePop(anchor) {
   const h = sharePop.offsetHeight;
   const left = Math.min(r.left, window.innerWidth - w - 8);
   let top = r.bottom + 6;
-  if (top + h > window.innerHeight - 8) top = r.top - h - 6;
+  // R7：只朝下——永远从按钮下方展开；下缘超出视口时仅上顶最少距离（不整块翻到按钮上方遮画面）
+  if (top + h > window.innerHeight - 8) top = Math.max(8, window.innerHeight - 8 - h);
   sharePop.style.left = left + "px";
   sharePop.style.top = top + "px";
 }
@@ -404,9 +423,7 @@ sharePop.querySelector("#sp-stop").addEventListener("click", async () => {
   // R3：未投屏时同一按钮 = 开启投屏（与卡片投屏按钮同流程）
   await videoCapture.startScreen();
   renderMembers(); // 重建卡片（旧节点已脱离 DOM，不能用作定位锚点）
-  if (videoCapture.isActive(videoCapture.STREAM_SCREEN)) {
-    videoView.preview(videoCapture.STREAM_SCREEN, videoCapture.getStream(videoCapture.STREAM_SCREEN));
-  }
+  if (videoCapture.isActive(videoCapture.STREAM_SCREEN)) enterSelfPreview(); // R8：连同另一路活跃流一起进
   syncSharePop();
 });
 
@@ -416,9 +433,7 @@ sharePop.querySelector("#sp-cam").addEventListener("click", async () => {
     await videoCapture.stop(videoCapture.STREAM_CAMERA); // 预览退出由流停止逻辑驱动（R2）
   } else {
     await videoCapture.startCamera();
-    if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) {
-      videoView.preview(videoCapture.STREAM_CAMERA, videoCapture.getStream(videoCapture.STREAM_CAMERA));
-    }
+    if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) enterSelfPreview(); // R8：连同另一路活跃流一起进
   }
   renderMembers();
   syncSharePop();

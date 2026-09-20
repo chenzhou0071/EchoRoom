@@ -61,6 +61,7 @@ window.videoCapture = (() => {
       forceKey: true, // 首帧必为关键帧
       configured: false, // 编码器是否已 configure（首帧必配，不依赖尺寸恰好变化）
       n: 0,
+      lastEncTs: 0, // R9：上次送入编码器的时刻（按档位帧率丢帧用）
       stopped: false,
     };
     session.encoder = new VideoEncoder({
@@ -92,6 +93,14 @@ window.videoCapture = (() => {
           frame.close();
           continue;
         }
+        // R9：按档位目标帧率丢帧——WebCodecs 的 framerate 仅是码控提示，编码器不会自动丢帧。
+        // 间隔不足目标周期×0.9 的帧丢弃（不画不编）；forceKey 帧（首帧/换档/观众到达）不节流，保证起步低延迟
+        const nowTs = performance.now();
+        if (!session.forceKey && nowTs - session.lastEncTs < (1000 / session.spec.framerate) * 0.9) {
+          frame.close();
+          continue;
+        }
+        session.lastEncTs = nowTs;
         // 首帧 / 档位切换后：按帧比例定 canvas 与编码尺寸（首帧必配置；尺寸相等也不能跳过配置）
         const { w, h } = targetSize(kind, frame);
         if (!session.configured || session.canvas.width !== w || session.canvas.height !== h) {

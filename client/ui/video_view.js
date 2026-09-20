@@ -13,6 +13,7 @@ window.videoView = (() => {
   let keyTimer = null; // 秒开重试定时器
   let lastReqAt = 0; // request_keyframe 节流
   let lastViewers = 0; // R1：最近一次观看人数（视图显隐时复用）
+  let isViewFull = false; // R6：画面全屏（视图层铺满窗口 + 窗口全屏）
   const gotKey = {}; // kind → 是否已见到关键帧（未见到前不喂 delta 帧）
   const decoders = {}; // kind → VideoDecoder
   const canvases = {}; // kind → canvas（观看模式）
@@ -249,6 +250,7 @@ window.videoView = (() => {
     }
     stopStats(); // R4：统计停止并收起徽标
     window.closeScreenVolPop?.(); // R4：投屏音量弹层随视图一起收
+    exitViewFull(); // R6：退出视图时复位画面全屏（窗口一并还原）
     const wasWatch = mode === "watch";
     mode = null;
     watchingUid = null;
@@ -283,6 +285,7 @@ window.videoView = (() => {
     if (mode !== "preview") await end(); // 与观看互斥（预览中追加第二路则不清场）
     mode = "preview";
     const old = previewVideos[kind];
+    if (old && old.srcObject === stream) return; // R8：同一路流已挂载（补齐另一路时的幂等调用）→ 不重建，保留小窗位置
     if (old) {
       old.srcObject = null;
       old.remove();
@@ -341,14 +344,29 @@ window.videoView = (() => {
     }
   }
 
-  async function toggleFullscreen() {
+  // R6：画面全屏——视图层 fixed 铺满整个窗口 + 窗口进系统全屏（画面因此铺满物理屏幕）
+  function exitViewFull() {
+    if (!isViewFull) return;
+    isViewFull = false;
+    viewEl().classList.remove("view-full");
+    document.getElementById("view-fs").classList.remove("on");
     try {
-      const w = window.__TAURI__.window.getCurrentWindow();
-      const cur = await w.isFullscreen();
-      await w.setFullscreen(!cur);
-      document.getElementById("view-fs").classList.toggle("on", !cur);
+      window.__TAURI__.window.getCurrentWindow().setFullscreen(false);
+    } catch {}
+  }
+
+  async function toggleFullscreen() {
+    if (isViewFull) {
+      exitViewFull();
+      return;
+    }
+    isViewFull = true;
+    viewEl().classList.add("view-full");
+    document.getElementById("view-fs").classList.add("on");
+    try {
+      await window.__TAURI__.window.getCurrentWindow().setFullscreen(true);
     } catch (e) {
-      console.warn("[view] 全屏切换失败:", e);
+      console.warn("[view] 窗口全屏切换失败:", e);
     }
   }
 
@@ -357,6 +375,10 @@ window.videoView = (() => {
     end(); // R4：预览=「返回」（退出视图，投屏继续，可去看别人的投屏）；观看=退订退出
   });
   document.getElementById("view-fs").addEventListener("click", () => toggleFullscreen());
+  // R6：画面全屏下 ESC 退出（标准视频习惯）
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && isViewFull) exitViewFull();
+  });
   // R4：预览左下角「停止投屏」= 全关（投屏 + 摄像头一并停止，视图随流停止退出）
   document.getElementById("view-stop-share").addEventListener("click", async () => {
     const vc = window.videoCapture;
