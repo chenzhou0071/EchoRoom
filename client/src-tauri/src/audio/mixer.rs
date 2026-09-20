@@ -21,7 +21,7 @@ impl MixAccumulator {
         }
     }
 
-    /// 增益后累加（gain 通常 0.0–2.0；越界样本 clamp 到 i16 域后再进 i32 累加）。
+    /// 增益后累加（gain 通常 0.0–4.0；越界样本 clamp 到 i16 域后再进 i32 累加）。
     /// gain ≈ 1.0 走原路径，避免无意义的浮点乘。
     pub fn add_scaled(&mut self, pcm: &[i16], gain: f32) {
         if (gain - 1.0).abs() < 1e-6 {

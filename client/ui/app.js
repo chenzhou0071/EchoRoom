@@ -205,7 +205,7 @@ function playSnd(audio) {
 // ---- 音量弹出面板（单例） ----
 const volPop = document.createElement("div");
 volPop.className = "vol-pop";
-volPop.innerHTML = '<div class="val"></div><input type="range" min="0" max="200" step="1" />';
+volPop.innerHTML = '<div class="val"></div><input type="range" min="0" max="400" step="1" />';
 document.body.appendChild(volPop);
 const volVal = volPop.querySelector(".val");
 const volSlider = volPop.querySelector('input[type="range"]');
@@ -262,7 +262,7 @@ volSlider.addEventListener("input", () => {
 el("view-vol").innerHTML = ICONS.volume;
 const screenVolPop = document.createElement("div");
 screenVolPop.className = "vol-pop screen-vol-pop";
-screenVolPop.innerHTML = '<div class="val"></div><input type="range" min="0" max="200" step="1" />';
+screenVolPop.innerHTML = '<div class="val"></div><input type="range" min="0" max="400" step="1" />';
 document.body.appendChild(screenVolPop);
 const screenVolVal = screenVolPop.querySelector(".val");
 const screenVolSlider = screenVolPop.querySelector('input[type="range"]');
@@ -452,6 +452,46 @@ document.addEventListener("click", (e) => {
   if (!e.target.closest(".share-pop") && !e.target.closest(".mbtn-screen")) closeSharePop();
 });
 
+// ---- R11：正文链接识别（http(s):// 与 www.*；尾部标点不吞；点击用系统浏览器打开） ----
+const LINK_RE = /(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:\/?#\[\]@!$&()*+,;=%]+/gi;
+const LINK_TAIL_PUNCT = ".,;:!?)]}";
+
+// 剥掉误吞的尾部标点（中文全角标点本就进不了 URL 字符集）；成对括号（如 /wiki/Foo_(bar)）不剥
+function stripUrlTail(raw) {
+  let url = raw;
+  while (url.length > 0) {
+    const c = url[url.length - 1];
+    if (!LINK_TAIL_PUNCT.includes(c)) break;
+    if (c === ")" && url.split("(").length >= url.split(")").length) break;
+    if (c === "]" && url.split("[").length >= url.split("]").length) break;
+    url = url.slice(0, -1);
+  }
+  return url;
+}
+
+// 正文按节点拼装（不走 innerHTML）：纯文本 textNode + 链接 <a.chat-link>
+function linkify(text, into) {
+  let last = 0;
+  for (const m of text.matchAll(LINK_RE)) {
+    const raw = m[0];
+    const url = stripUrlTail(raw);
+    if (!url) continue;
+    if (m.index > last) into.appendChild(document.createTextNode(text.slice(last, m.index)));
+    const a = document.createElement("a");
+    a.className = "chat-link";
+    a.textContent = url;
+    const target = /^www\./i.test(url) ? "https://" + url : url; // www. 开头补协议
+    a.addEventListener("click", () => {
+      invoke("open_url", { url: target }).catch((e) => console.error("打开链接失败:", e));
+    });
+    into.appendChild(a);
+    const tail = raw.slice(url.length);
+    if (tail) into.appendChild(document.createTextNode(tail));
+    last = m.index + raw.length;
+  }
+  if (last < text.length) into.appendChild(document.createTextNode(text.slice(last)));
+}
+
 // ---- 渲染：公屏（两行：昵称：HH:MM / 正文；时间取到达时刻的本地时间） ----
 function appendMessage(uid, text) {
   const box = el("chat");
@@ -471,7 +511,7 @@ function appendMessage(uid, text) {
   div.appendChild(meta);
   const body = document.createElement("div");
   body.className = "msg-text";
-  body.textContent = text;
+  linkify(text, body); // R11：正文链接标蓝可点
   div.appendChild(body);
   box.appendChild(div);
   if (nearBottom) box.scrollTop = box.scrollHeight; // 仅当贴底时自动跟随，不打断回看

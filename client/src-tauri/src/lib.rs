@@ -43,7 +43,8 @@ pub fn run() {
             bridge::screen_audio_supported,
             bridge::send_video_frame,
             bridge::watch_start,
-            bridge::watch_stop
+            bridge::watch_stop,
+            bridge::open_url
         ])
         // 连接时机交给 UI：前端注册好事件监听后再 invoke("connect")，
         // 避免"连接过快、事件先于监听器到达"导致首屏丢事件。

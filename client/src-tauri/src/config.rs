@@ -20,7 +20,7 @@ fn default_share_quality() -> String {
 pub struct Config {
     pub nickname: String,
     pub server_addr: String,
-    /// 自己的采集增益（0.0–2.0）
+    /// 自己的采集增益（0.0–4.0）
     #[serde(default = "default_gain")]
     pub self_gain: f32,
     /// 自己的静音状态
@@ -29,7 +29,7 @@ pub struct Config {
     /// 对他人的播放增益（按昵称）
     #[serde(default)]
     pub peer_gains: std::collections::HashMap<String, f32>,
-    /// 观看端：投屏（屏幕）声音的播放增益（0.0–2.0）
+    /// 观看端：投屏（屏幕）声音的播放增益（0.0–4.0）
     #[serde(default = "default_gain")]
     pub screen_gain: f32,
     /// 投屏画质档位（"720p30" / "1080p15" / "1080p30"）

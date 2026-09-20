@@ -153,7 +153,7 @@ fn persist(state: &AppState) {
 
 #[tauri::command]
 pub fn set_self_gain(app: AppHandle, state: State<AppState>, gain: f32) {
-    let g = gain.clamp(0.0, 2.0);
+    let g = gain.clamp(0.0, 4.0);
     state
         .shared
         .self_gain
@@ -179,7 +179,7 @@ pub fn set_muted(app: AppHandle, state: State<AppState>, on: bool) {
 
 #[tauri::command]
 pub fn set_peer_gain(app: AppHandle, state: State<AppState>, nickname: String, gain: f32) {
-    let g = gain.clamp(0.0, 2.0);
+    let g = gain.clamp(0.0, 4.0);
     let snapshot = {
         let mut map = state.shared.peer_gains.lock().unwrap();
         map.insert(nickname, g);
@@ -190,10 +190,10 @@ pub fn set_peer_gain(app: AppHandle, state: State<AppState>, nickname: String, g
     let _ = app.emit("volume", volume_json(&state));
 }
 
-/// 观看端：投屏（屏幕）声音的播放增益（0.0–2.0）；无需事件回传，前端持有滑块真值
+/// 观看端：投屏（屏幕）声音的播放增益（0.0–4.0）；无需事件回传，前端持有滑块真值
 #[tauri::command]
 pub fn set_screen_gain(state: State<AppState>, gain: f32) {
-    let g = gain.clamp(0.0, 2.0);
+    let g = gain.clamp(0.0, 4.0);
     state
         .shared
         .screen_gain
@@ -423,4 +423,68 @@ pub fn watch_stop(state: State<AppState>) -> Result<(), String> {
         let _ = h.tx.send(NetCmd::Subscribe(None));
     }
     Ok(())
+}
+
+/// R11：聊天正文里的链接 → 系统默认浏览器打开。前端已做识别，这里是第二道闸。
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if !is_web_url(url) {
+        return Err("仅支持 http/https 链接".into());
+    }
+    open_in_browser(url).map_err(|e| format!("打开浏览器失败：{e}"))
+}
+
+/// 仅接受 http:// 或 https:// 开头的地址（大小写不敏感）
+fn is_web_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+/// ShellExecuteW 以 "open" 动词交给系统默认浏览器
+fn open_in_browser(url: &str) -> anyhow::Result<()> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HINSTANCE;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let op: Vec<u16> = "open\0".encode_utf16().collect();
+    let file: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    let h: HINSTANCE = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(op.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // Win32 约定：返回值 <= 32 表示失败
+    if h.0 as isize <= 32 {
+        anyhow::bail!("ShellExecuteW 返回 {}", h.0 as isize);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_web_url;
+
+    #[test]
+    fn is_web_url_accepts_http_https_case_insensitive() {
+        assert!(is_web_url("http://b23.tv/abc"));
+        assert!(is_web_url("https://www.bilibili.com/video/BV1xx?p=2&t=3"));
+        assert!(is_web_url("HTTPS://Example.com"));
+        assert!(is_web_url("  https://example.com  "));
+    }
+
+    #[test]
+    fn is_web_url_rejects_other_schemes_and_plain_text() {
+        assert!(!is_web_url("javascript:alert(1)"));
+        assert!(!is_web_url("file:///C:/Windows/System32"));
+        assert!(!is_web_url("ftp://example.com"));
+        assert!(!is_web_url("www.bilibili.com")); // 前端补全 https:// 后才交给后端
+        assert!(!is_web_url(""));
+    }
 }

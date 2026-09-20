@@ -222,6 +222,9 @@ body {
 .msg-meta .name { color: #7aa2f7; }
 .msg-meta .time { color: var(--text-dim); margin-left: 4px; }
 .msg-text { font-size: 13px; line-height: 1.5; margin-top: 2px; }
+/* R11：正文里的链接（标蓝，点击用系统浏览器打开） */
+.msg-text .chat-link { color: var(--accent); cursor: pointer; word-break: break-all; }
+.msg-text .chat-link:hover { text-decoration: underline; }
 .msg.sys { color: var(--text-dim); font-style: italic; font-size: 13px; }
 
 /* ---- 输入行 ---- */
