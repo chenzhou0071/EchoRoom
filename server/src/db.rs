@@ -1,4 +1,4 @@
-//! SQLite 持久层：账号、密码哈希、token（含 8 条修剪）；头像图片存文件系统
+//! SQLite 持久层：账号、密码哈希、token（含 8 条修剪与 24h 滑动过期）；头像图片存文件系统
 //! （<数据目录>/avatars/<account_id>.jpg），库内只留 has_avatar 标记。
 //! 单连接 + Mutex 串行化（6 人规模足够）；rusqlite bundled 把 SQLite 编进二进制。
 use std::path::{Path, PathBuf};
@@ -8,6 +8,9 @@ use rusqlite::{params, Connection};
 
 /// 每账号最多保留的 auth_token 条数（超出删最旧，支持换设备）
 pub const TOKEN_LIMIT: usize = 8;
+
+/// auth_token 有效期（秒）：超过此时长未使用即失效；每次使用滑动续期
+pub const TOKEN_TTL_SECS: i64 = 24 * 3600;
 
 /// 账号记录（has_avatar 为库内标记列：0 无头像 / 1 有头像）
 #[derive(Debug, Clone, PartialEq)]
@@ -89,11 +92,16 @@ impl Db {
                created_at    INTEGER NOT NULL
              );
              CREATE TABLE IF NOT EXISTS tokens (
-               token      TEXT PRIMARY KEY,
-               account_id INTEGER NOT NULL,
-               created_at INTEGER NOT NULL
+               token        TEXT PRIMARY KEY,
+               account_id   INTEGER NOT NULL,
+               created_at   INTEGER NOT NULL,
+               last_used_at INTEGER NOT NULL
              );",
         )?;
+        // 旧库迁移：补 last_used_at 列（列已存在时 duplicate column 报错，忽略）
+        let _ = conn.execute("ALTER TABLE tokens ADD COLUMN last_used_at INTEGER NOT NULL DEFAULT 0", []);
+        // 旧行回填：以创建时间作最后使用时间（新库无 0 值行，无影响）
+        conn.execute("UPDATE tokens SET last_used_at = created_at WHERE last_used_at = 0", [])?;
         Ok(())
     }
 
@@ -132,33 +140,50 @@ impl Db {
         .ok()
     }
 
-    /// 写入 auth_token 并修剪：每账号只保留最新 TOKEN_LIMIT 条（同秒以 rowid 兜底）
+    /// 写入 auth_token：插入即开始滑动计时；顺带清理该账号过期 token 并修剪到 TOKEN_LIMIT 条
     pub fn insert_token(&self, account_id: i64, token: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
+        let now = now_secs();
         conn.execute(
-            "INSERT INTO tokens (token, account_id, created_at) VALUES (?1, ?2, ?3)",
-            params![token, account_id, now_secs()],
+            "INSERT INTO tokens (token, account_id, created_at, last_used_at) VALUES (?1, ?2, ?3, ?3)",
+            params![token, account_id, now],
+        )?;
+        // 过期清理：失效 token 不再占 8 条额度
+        conn.execute(
+            "DELETE FROM tokens WHERE account_id = ?1 AND last_used_at <= ?2",
+            params![account_id, now - TOKEN_TTL_SECS],
         )?;
         conn.execute(
             "DELETE FROM tokens WHERE account_id = ?1 AND token NOT IN (
                SELECT token FROM tokens WHERE account_id = ?1
-               ORDER BY created_at DESC, rowid DESC LIMIT ?2
+               ORDER BY last_used_at DESC, rowid DESC LIMIT ?2
              )",
             params![account_id, TOKEN_LIMIT as i64],
         )?;
         Ok(())
     }
 
+    /// 按 token 查账号：仅命中 24h 内使用过的（使用即续期由 touch_token 完成）
     pub fn find_account_by_token(&self, token: &str) -> Option<Account> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT a.id, a.account, a.password_hash, a.nickname, a.has_avatar
              FROM tokens t JOIN accounts a ON a.id = t.account_id
-             WHERE t.token = ?1",
-            params![token],
+             WHERE t.token = ?1 AND t.last_used_at > ?2",
+            params![token, now_secs() - TOKEN_TTL_SECS],
             row_to_account,
         )
         .ok()
+    }
+
+    /// 滑动续期：使用 token 成功后回写最后使用时间（下一个 24h）
+    pub fn touch_token(&self, token: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE tokens SET last_used_at = ?1 WHERE token = ?2",
+            params![now_secs(), token],
+        )?;
+        Ok(())
     }
 
     pub fn update_nickname(&self, account_id: i64, nickname: &str) -> anyhow::Result<()> {
@@ -184,17 +209,6 @@ impl Db {
     /// 读头像文件（不存在 → None）
     pub fn get_avatar(&self, account_id: i64) -> Option<Vec<u8>> {
         std::fs::read(self.avatar_dir.join(format!("{account_id}.jpg"))).ok()
-    }
-
-    /// 是否有头像（读标记列，不碰文件）
-    pub fn has_avatar(&self, account_id: i64) -> bool {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT has_avatar FROM accounts WHERE id = ?1",
-            params![account_id],
-            |row| row.get::<_, bool>(0),
-        )
-        .unwrap_or(false)
     }
 }
 
@@ -241,12 +255,11 @@ mod tests {
     fn update_nickname_and_avatar() {
         let db = Db::open_in_memory();
         let id = db.create_account("alice", "h1", "alice").unwrap();
-        assert!(!db.has_avatar(id));
+        assert!(!db.find_account("alice").unwrap().has_avatar);
         db.update_nickname(id, "阿信").unwrap();
         assert_eq!(db.find_account("alice").unwrap().nickname, "阿信");
         let img = vec![1u8, 2, 3, 4, 5];
         db.update_avatar(id, &img).unwrap();
-        assert!(db.has_avatar(id));
         assert!(db.avatar_dir.join(format!("{id}.jpg")).exists(), "头像应落盘为文件");
         assert_eq!(db.get_avatar(id).unwrap(), img);
         assert!(db.find_account("alice").unwrap().has_avatar);
@@ -258,6 +271,65 @@ mod tests {
         let id = db.create_account("alice", "h1", "alice").unwrap();
         assert_eq!(db.get_avatar(id), None);
         assert_eq!(db.get_avatar(999), None);
-        assert!(!db.has_avatar(999));
+    }
+
+    #[test]
+    fn token_sliding_expiry() {
+        let db = Db::open_in_memory();
+        let id = db.create_account("alice", "h1", "alice").unwrap();
+        db.insert_token(id, "tok").unwrap();
+        assert!(db.find_account_by_token("tok").is_some());
+        // 模拟超过 24h 未使用 → 过期
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE tokens SET last_used_at = ?1 WHERE token = 'tok'",
+                params![now_secs() - TOKEN_TTL_SECS - 60],
+            )
+            .unwrap();
+        }
+        assert!(db.find_account_by_token("tok").is_none(), "超 24h 未使用应失效");
+        // 使用即续期：touch 后重新有效
+        db.touch_token("tok").unwrap();
+        assert!(db.find_account_by_token("tok").is_some(), "touch 后应恢复有效");
+    }
+
+    #[test]
+    fn insert_token_cleans_expired() {
+        let db = Db::open_in_memory();
+        let id = db.create_account("alice", "h1", "alice").unwrap();
+        db.insert_token(id, "old-a").unwrap();
+        db.insert_token(id, "old-b").unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE tokens SET last_used_at = ?1", params![now_secs() - TOKEN_TTL_SECS - 60])
+                .unwrap();
+        }
+        db.insert_token(id, "new").unwrap();
+        let cnt: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM tokens WHERE account_id = ?1", params![id], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(cnt, 1, "过期 token 应在插入时被清理，只留新的");
+        assert!(db.find_account_by_token("new").is_some());
+    }
+
+    #[test]
+    fn legacy_tokens_table_migrates() {
+        // 模拟旧库：tokens 表无 last_used_at 列
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tokens (token TEXT PRIMARY KEY, account_id INTEGER NOT NULL, created_at INTEGER NOT NULL);
+             INSERT INTO tokens VALUES ('legacy', 1, 12345);",
+        )
+        .unwrap();
+        let db = Db::with_conn(conn, std::env::temp_dir().join("echoroom-test-migrate-avatars")).unwrap();
+        let last: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT last_used_at FROM tokens WHERE token = 'legacy'", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(last, 12345, "旧行应回填 last_used_at = created_at");
     }
 }

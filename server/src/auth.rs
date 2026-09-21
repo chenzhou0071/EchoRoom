@@ -120,11 +120,13 @@ pub fn login(db: &Db, account: &str, password: &str) -> Result<AuthResult, Strin
     })
 }
 
-/// 自动登录：token 换身份（失效 → 客户端回登录页）
+/// 自动登录：token 换身份（失效/超 24h 未用 → 客户端回登录页）
 pub fn resume(db: &Db, auth_token: &str) -> Result<AuthResult, String> {
     let Some(acc) = db.find_account_by_token(auth_token) else {
         return Err("登录已过期".into());
     };
+    // 滑动续期：本次使用成功即刷新 24h 有效期（活跃则可持续免登）
+    db.touch_token(auth_token).map_err(|e| format!("服务器错误：{e}"))?;
     Ok(AuthResult {
         account_id: acc.id,
         nickname: acc.nickname,
