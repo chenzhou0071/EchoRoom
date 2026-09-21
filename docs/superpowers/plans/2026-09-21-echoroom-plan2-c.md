@@ -2626,7 +2626,7 @@ Expected: workspace 编译通过（client bin `Echo` 链接成功；`cargo check
 - Consumes: Task 3 的命令 `auth_login(serverAddr, account, password)` / `auth_register(serverAddr, account, password, invite)` / `auto_connect()` / `set_profile(nickname, avatar)`；事件 `auth_ok` / `auth_fail` / `profile_changed` / `profile_error`；`members` 五元组 / `member_join` 三元组；config 的 `server_addr` / `account` / `auth_token`
 - Produces（Task 5 复用/扩展）：`showAuthPanel(mode, error)`、`showAuthError(msg)`、`openProfilePop(defaultName)`、`closeProfilePop()`、`showProfileError(msg)`、`profileSubmitting` 标志、`members` 条目中的 `hasAvatar` 字段
 
-- [ ] **Step 1: index.html——认证面板替换 + 资料弹窗新增**
+- [x] **Step 1: index.html——认证面板替换 + 资料弹窗新增**
 
 `client/ui/index.html` 中 `setup-mask` 整块（原 L43-50）替换为：
 
@@ -2655,7 +2655,7 @@ Expected: workspace 编译通过（client bin `Echo` 链接成功；`cargo check
   </div>
 ```
 
-- [ ] **Step 2: app.js——状态变量与认证 / 资料弹窗逻辑**
+- [x] **Step 2: app.js——状态变量与认证 / 资料弹窗逻辑**
 
 状态区（`let lastViewerUids = [];` 之后）加：
 ```js
@@ -2766,7 +2766,7 @@ el("profile-nickname").addEventListener("keydown", (e) => {
 });
 ```
 
-- [ ] **Step 3: app.js——事件监听更新与 init 尾部**
+- [x] **Step 3: app.js——事件监听更新与 init 尾部**
 
 `members` 监听改为五元组解构（`hasAvatar` 存进成员对象，Task 5 渲染用）：
 ```js
@@ -2848,7 +2848,7 @@ init 尾部（`if (!cfg.nickname) { ... } else { await invoke("connect"); }` 整
   }
 ```
 
-- [ ] **Step 4: style.css——错误行与链接按钮**
+- [x] **Step 4: style.css——错误行与链接按钮**
 
 `client/ui/style.css` 在 `.setup-panel button { ... }` 规则之后追加：
 ```css
@@ -2869,7 +2869,7 @@ init 尾部（`if (!cfg.nickname) { ... } else { await invoke("connect"); }` 整
 .setup-panel .setup-link:hover { text-decoration: underline; }
 ```
 
-- [ ] **Step 5: 语法校验**
+- [x] **Step 5: 语法校验**
 
 Run: `node --check client/ui/app.js`
 Expected: 无输出（语法通过）。
