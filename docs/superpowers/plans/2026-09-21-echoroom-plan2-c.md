@@ -2891,7 +2891,7 @@ Expected: 无输出（语法通过）。
 - Consumes: Task 4 的 `openProfilePop` / `closeProfilePop` / `showProfileError` / `profileSubmitting`；Task 3 的 `avatar_request(uid)` 命令与 `avatar_data` 事件、`set_profile(nickname, avatar)` 的 avatar 参数；`members` 五元组 / `member_join` 三元组中的 `hasAvatar`
 - Produces: `avatarCache` / `ensureAvatar(uid, hasAvatar)` / `forceRequestAvatar(uid)`；头像 DOM 类 `.member-avatar-img`
 
-- [ ] **Step 1: index.html——资料弹窗加头像行**
+- [x] **Step 1: index.html——资料弹窗加头像行**
 
 `client/ui/index.html` 的 profile-mask 中，`<h2>完善资料</h2>` 与 `<input id="profile-nickname" ...` 之间插入：
 ```html
@@ -2902,7 +2902,7 @@ Expected: 无输出（语法通过）。
       </div>
 ```
 
-- [ ] **Step 2: app.js——头像缓存、压缩与懒加载函数**
+- [x] **Step 2: app.js——头像缓存、压缩与懒加载函数**
 
 状态区（`let profileSubmitting = false;` 之后）加：
 ```js
@@ -2966,7 +2966,7 @@ function forceRequestAvatar(uid) {
   ensureAvatar(uid, m.hasAvatar); // 懒加载（缓存命中 / 无头像时直接返回）
 ```
 
-- [ ] **Step 3: app.js——弹窗头像接线（预览 / 选择 / 提交）**
+- [x] **Step 3: app.js——弹窗头像接线（预览 / 选择 / 提交）**
 
 `openProfilePop` 替换（Task 4 版 → 头像版）：
 ```js
@@ -3069,7 +3069,7 @@ el("profile-avatar-file").addEventListener("change", async (e) => {
 });
 ```
 
-- [ ] **Step 4: app.js——事件监听（头像数据与缓存清理）**
+- [x] **Step 4: app.js——事件监听（头像数据与缓存清理）**
 
 `profile_error` 监听之后追加：
 ```js
@@ -3143,7 +3143,7 @@ el("profile-avatar-file").addEventListener("change", async (e) => {
   });
 ```
 
-- [ ] **Step 5: style.css——头像行与头像图**
+- [x] **Step 5: style.css——头像行与头像图**
 
 `client/ui/style.css` 的 `.setup-panel .setup-link:hover { text-decoration: underline; }` 之后追加：
 ```css
@@ -3174,7 +3174,7 @@ el("profile-avatar-file").addEventListener("change", async (e) => {
 }
 ```
 
-- [ ] **Step 6: 语法校验**
+- [x] **Step 6: 语法校验**
 
 Run: `node --check client/ui/app.js`
 Expected: 无输出（语法通过）。
