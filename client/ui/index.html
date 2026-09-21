@@ -56,6 +56,11 @@
   <div class="setup-mask hidden" id="profile-mask">
     <div class="setup-panel">
       <h2>完善资料</h2>
+      <div class="profile-avatar-row">
+        <div class="profile-avatar-preview" id="profile-avatar-preview"></div>
+        <button class="setup-link" id="profile-avatar-pick" type="button">选择图片</button>
+        <input id="profile-avatar-file" type="file" accept="image/*" hidden />
+      </div>
       <input id="profile-nickname" type="text" maxlength="24" placeholder="昵称（1-24 字符）" />
       <div class="setup-error" id="profile-error" hidden></div>
       <button id="profile-submit">保存</button>

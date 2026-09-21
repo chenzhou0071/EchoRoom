@@ -17,6 +17,12 @@ let authMode = "login"; // "login" | "register"
 let lastAuthAttempt = null; // 最近一次提交的意图（auth_ok 判断是否弹资料窗）
 let profileSubmitting = false; // 资料提交中：等 profile_changed 广播回来才关弹窗
 
+// C：头像
+const avatarCache = new Map(); // uid → Blob URL；null = 已确认无头像
+const avatarPending = new Set(); // 已请求未回复的 uid（防重入）
+let pendingAvatar = null; // 资料弹窗待提交的新头像（压缩后 Uint8Array）
+let previewUrl = null; // 弹窗预览的临时 Blob URL（避免泄漏）
+
 // ---- 图标（feather 风格内联 SVG，currentColor 随按钮状态变色）----
 const ICONS = {
   mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>',
@@ -47,6 +53,34 @@ function sortedMembers() {
   return [...members.entries()].sort((a, b) => a[0] - b[0]); // 按 uid 升序 = 进入顺序
 }
 
+// ---- C：头像懒加载（members 五元组带 has_avatar；AvatarData 空数据 = 无头像） ----
+function ensureAvatar(uid, hasAvatar) {
+  if (avatarCache.has(uid)) return; // 命中缓存（含 null = 已确认无头像）
+  if (!hasAvatar) {
+    avatarCache.set(uid, null); // 无头像：不再请求
+    return;
+  }
+  if (avatarPending.has(uid)) return;
+  avatarPending.add(uid);
+  invoke("avatar_request", { uid }).catch((e) => {
+    avatarPending.delete(uid);
+    console.error("请求头像失败:", e);
+  });
+}
+
+// 强制重拉（profile_changed 后头像可能变化，has_avatar 快捷路径不可信）
+function forceRequestAvatar(uid) {
+  const old = avatarCache.get(uid);
+  if (old) URL.revokeObjectURL(old);
+  avatarCache.delete(uid);
+  avatarPending.delete(uid);
+  avatarPending.add(uid);
+  invoke("avatar_request", { uid }).catch((e) => {
+    avatarPending.delete(uid);
+    console.error("请求头像失败:", e);
+  });
+}
+
 function buildCard(uid, m) {
   const isSelf = uid === myUid;
   const div = document.createElement("div");
@@ -55,7 +89,17 @@ function buildCard(uid, m) {
 
   const avatar = document.createElement("div");
   avatar.className = "member-avatar";
-  avatar.innerHTML = ICONS.avatar;
+  const avatarUrl = avatarCache.get(uid);
+  if (avatarUrl) {
+    const img = document.createElement("img");
+    img.className = "member-avatar-img";
+    img.src = avatarUrl;
+    img.draggable = false;
+    avatar.appendChild(img);
+  } else {
+    avatar.innerHTML = ICONS.avatar;
+  }
+  ensureAvatar(uid, m.hasAvatar); // 懒加载（缓存命中 / 无头像时直接返回）
   // 直播中的纱（中央播放按钮）：他人=观看对方流（再点退出）；自己=回到自预览（R5）
   if (m.streams) {
     const veil = document.createElement("div");
@@ -619,7 +663,20 @@ function showProfileError(msg) {
 
 function openProfilePop(defaultName) {
   showProfileError("");
+  pendingAvatar = null;
   el("profile-nickname").value = defaultName || "";
+  // 头像预览：优先已缓存的当前头像，否则剪影
+  const preview = el("profile-avatar-preview");
+  const cached = myUid != null ? avatarCache.get(myUid) : null;
+  if (cached) {
+    const img = document.createElement("img");
+    img.className = "member-avatar-img";
+    img.src = cached;
+    img.draggable = false;
+    preview.replaceChildren(img);
+  } else {
+    preview.innerHTML = ICONS.avatar;
+  }
   el("profile-mask").classList.remove("hidden");
   el("profile-nickname").focus();
 }
@@ -628,6 +685,11 @@ function closeProfilePop() {
   el("profile-mask").classList.add("hidden");
   profileSubmitting = false;
   el("profile-submit").disabled = false;
+  pendingAvatar = null;
+  if (previewUrl) {
+    URL.revokeObjectURL(previewUrl);
+    previewUrl = null;
+  }
 }
 
 function submitProfile() {
@@ -639,7 +701,7 @@ function submitProfile() {
   profileSubmitting = true;
   el("profile-submit").disabled = true;
   showProfileError("");
-  invoke("set_profile", { nickname, avatar: null }).catch((e) => {
+  invoke("set_profile", { nickname, avatar: pendingAvatar ? Array.from(pendingAvatar) : null }).catch((e) => {
     // 命令层失败（未连接等）：复位；服务器校验失败经 profile_error 事件回来
     profileSubmitting = false;
     el("profile-submit").disabled = false;
@@ -653,6 +715,44 @@ el("profile-nickname").addEventListener("keydown", (e) => {
   if (e.key === "Enter") submitProfile();
 });
 
+// ---- C：头像压缩（浏览端缩 256×256 居中裁剪 JPEG q85；≤64KB 校验） ----
+async function shrinkAvatar(file) {
+  const bmp = await createImageBitmap(file);
+  const size = Math.min(bmp.width, bmp.height);
+  const sx = (bmp.width - size) / 2;
+  const sy = (bmp.height - size) / 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 256;
+  canvas.getContext("2d").drawImage(bmp, sx, sy, size, size, 0, 0, 256, 256);
+  bmp.close();
+  const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.85));
+  if (!blob) throw new Error("图片处理失败");
+  if (blob.size > 64 * 1024) throw new Error("图片过大，请换一张更简单的图片");
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+el("profile-avatar-pick").addEventListener("click", () => el("profile-avatar-file").click());
+el("profile-avatar-file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = ""; // 允许重复选择同一文件
+  if (!file) return;
+  try {
+    const bytes = await shrinkAvatar(file);
+    pendingAvatar = bytes;
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+    const img = document.createElement("img");
+    img.className = "member-avatar-img";
+    img.src = previewUrl;
+    img.draggable = false;
+    el("profile-avatar-preview").replaceChildren(img);
+    showProfileError("");
+  } catch (err) {
+    showProfileError(String(err && err.message ? err.message : err));
+  }
+});
+
 // ---- 事件接线与启动 ----
 async function init() {
   // 先注册监听器，再发起连接：保证事件不因时序竞态丢失
@@ -661,6 +761,10 @@ async function init() {
     renderMembers(); // 幂等：myUid 变化后重渲染（区分自己/他人卡片）
   });
   await listen("members", (e) => {
+    // 全量列表（首次/重连）：uid 可能被重新分配，头像缓存全部作废
+    for (const url of avatarCache.values()) if (url) URL.revokeObjectURL(url);
+    avatarCache.clear();
+    avatarPending.clear();
     members.clear();
     for (const [uid, nickname, muted, streams, hasAvatar] of e.payload) {
       members.set(uid, { nickname, speaking: false, muted, streams, hasAvatar });
@@ -682,6 +786,10 @@ async function init() {
   await listen("member_leave", (e) => {
     const uid = e.payload;
     if (videoView.watchingUid === uid) videoView.end(); // 被观看者离开：订阅已随其退出失效，直接收尾
+    const url = avatarCache.get(uid);
+    if (url) URL.revokeObjectURL(url);
+    avatarCache.delete(uid);
+    avatarPending.delete(uid);
     members.delete(uid);
     renderMembers();
     renderOnline();
@@ -774,6 +882,7 @@ async function init() {
     if (m) m.nickname = nickname;
     renderMembers();
     renderOnline();
+    forceRequestAvatar(uid); // 头像可能同期更新：绕过 has_avatar 快捷路径强制重拉
     if (profileSubmitting && uid === myUid) closeProfilePop(); // 自己保存成功：广播回来才关窗
   });
   await listen("profile_error", (e) => {
@@ -781,6 +890,19 @@ async function init() {
     profileSubmitting = false;
     el("profile-submit").disabled = false;
     showProfileError(String(e.payload));
+  });
+  await listen("avatar_data", (e) => {
+    const { uid, data } = e.payload;
+    avatarPending.delete(uid);
+    const old = avatarCache.get(uid);
+    if (old) URL.revokeObjectURL(old);
+    if (data && data.length > 0) {
+      const blob = new Blob([new Uint8Array(data)], { type: "image/jpeg" });
+      avatarCache.set(uid, URL.createObjectURL(blob));
+    } else {
+      avatarCache.set(uid, null); // 确认无头像
+    }
+    renderMembers();
   });
 
   const cfg = await invoke("get_config");
