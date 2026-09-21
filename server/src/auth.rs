@@ -38,6 +38,10 @@ pub fn validate_password(password: &str) -> Result<(), String> {
     if n > 64 {
         return Err("密码过长（上限 64 字符）".into());
     }
+    // 仅允许 ASCII 字母、数字、符号（拒绝中文/空格/emoji）
+    if !password.chars().all(|c| c.is_ascii_alphanumeric() || c.is_ascii_punctuation()) {
+        return Err("密码只能包含英文、数字或符号".into());
+    }
     Ok(())
 }
 
@@ -218,6 +222,20 @@ mod tests {
         assert_eq!(
             register(&db, Some("code-1"), "Alice", "pw123456", "code-1").unwrap_err(),
             "账号已存在"
+        );
+    }
+
+    #[test]
+    fn password_charset_rejects_non_ascii() {
+        assert!(validate_password("abc123").is_ok());
+        assert!(validate_password("P@ss!#$%^&*()").is_ok());
+        assert_eq!(validate_password("密码123456").unwrap_err(), "密码只能包含英文、数字或符号");
+        assert_eq!(validate_password("pass word").unwrap_err(), "密码只能包含英文、数字或符号");
+        // 注册路径同样在格式校验阶段拦截
+        let db = mem_db();
+        assert_eq!(
+            register(&db, Some("code-1"), "alice", "密码123456", "code-1").unwrap_err(),
+            "密码只能包含英文、数字或符号"
         );
     }
 
