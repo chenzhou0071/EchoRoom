@@ -56,6 +56,7 @@
 | 密码存储 | **argon2id**（`argon2` crate，PHC 字符串自带盐与参数） | 业界标准，纯 Rust；2C2G 上单次 ~20-50ms 可接受 |
 | token 生成 | **真随机**（`rand` OsRng，16 字节 → 32 位 hex） | 现有 LCG 可预测，绝不能用于身份凭证；顺手把 UDP token 的 LCG 也换掉 |
 | 多设备 | 每账号最多 **8 条** token，超出删最旧；同账号可多机同时在线（各自 uid） | "换设备"是账号系统的核心动机之一 |
+| token 有效期 | **24h 滑动过期**：每次认证成功（登录/注册/Resume）刷新该 token 的 24h 有效期，活跃则持续免登；超 24h 未使用 → `登录已过期` 回登录页 | 用户确认：较长时间不登录才失效，24h 内登录可刷新持续 |
 | 认证与进房 | **合一**：认证成功即加入房间，单消息往返 | 单房间模型下两步没有收益 |
 | 注册后体验 | **注册成功即进房**，资料弹窗盖在房间上；跳过则昵称=账号名 | 任何一步中断都有合法状态（账号已建、身份可用） |
 | 头像传输 | **懒加载**：成员元组带 `has_avatar` 标记，前端按需 `AvatarRequest` 拉取 | 避免进房/成员事件广播大块二进制；换头像后重拉即刷新 |
@@ -107,13 +108,14 @@ CREATE TABLE IF NOT EXISTS accounts (
   created_at    INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tokens (
-  token      TEXT PRIMARY KEY,             -- 32 位 hex
-  account_id INTEGER NOT NULL,             -- 每账号上限 8 条，超出删最旧
-  created_at INTEGER NOT NULL
+  token        TEXT PRIMARY KEY,           -- 32 位 hex
+  account_id   INTEGER NOT NULL,           -- 每账号上限 8 条，超出删最旧
+  created_at   INTEGER NOT NULL,           -- 签发时间
+  last_used_at INTEGER NOT NULL            -- 最后使用时间（24h 滑动有效期；旧库迁移回填 created_at）
 );
 ```
 
-接口：`create_account` / `verify_login`（查账号 + argon2 verify）/ `insert_token`（含 8 条修剪）/ `find_by_token` / `update_nickname` / `update_avatar` / `get_avatar` / `has_avatar`。
+接口：`create_account` / `verify_login`（查账号 + argon2 verify）/ `insert_token`（含 8 条修剪与过期清理）/ `find_by_token`（仅命中 24h 内使用过的）/ `touch_token`（滑动续期）/ `update_nickname` / `update_avatar` / `get_avatar`。
 
 **`server/src/auth.rs`（新）**：注册/登录/Resume/资料更新的业务逻辑与格式校验（账号、密码、昵称、邀请码、头像大小），错误原因文案：
 
@@ -165,6 +167,7 @@ CREATE TABLE IF NOT EXISTS tokens (
 | 场景 | 行为 |
 |------|------|
 | 注册/登录/Resume 失败 | `AuthReject{reason}` → 面板错误行/登录页提示；连接随后关闭 |
+| token 超 24h 未使用 | 查询 `last_used_at` 过期 → `登录已过期`，客户端清 token 回登录页（重新输密码登录） |
 | 服务器重启 | DB 持久，token 仍有效 → 客户端自动重连（携 Resume）无感知；房间内存态清空与现状一致 |
 | 多设备 | 同账号多机在线（各自 uid、uid 内昵称相同）；token 独立、上限 8/账号 |
 | 头像超限 | 服务器二次校验 ≤64KB，超限拒绝并回错误 |
@@ -178,7 +181,7 @@ CREATE TABLE IF NOT EXISTS tokens (
 **Rust 单测**：
 
 - `protocol`：新消息编解码 round-trip（含 bytes 字段、成员五元组、`Option<Vec<u8>>`）
-- `server/db.rs`：`:memory:` SQLite——建表、创建/查询账号、token 插入与 8 条修剪、资料更新、头像存取
+- `server/db.rs`：`:memory:` SQLite——建表、创建/查询账号、token 插入与 8 条修剪、24h 滑动过期与 touch 续期、过期清理、旧库迁移、资料更新、头像存取
 - `server/auth.rs`：注册全链路（校验/查重/哈希）、登录成败、Resume 失效、昵称/账号格式边界
 - `server/room.rs`：现有测试随五元组升级；新增 `update_nickname`/`account_id_of` 行为
 

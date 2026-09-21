@@ -445,7 +445,7 @@ Expected: 报错清单与上述一致（多出的报错逐条核对后留给 Tas
 - Consumes: Task 1 的协议类型（集成步骤 6–9 使用）
 - 任务结构：持久层/业务两个新模块（Step 1–5）+ 服务器整体切换到认证协议（Step 6–9）。**本任务结束时 `cargo test -p echoroom-server` 全绿**；client 仍断裂（Task 3 修复）
 - Produces（Task 3 依赖）：
-  - `db::Db`：`open(path) -> anyhow::Result<Db>`；`create_account(account, password_hash, nickname) -> Result<i64, DbError>`；`find_account(account) -> Option<Account>`；`insert_token(account_id, token) -> anyhow::Result<()>`（自动修剪到 8 条）；`find_account_by_token(token) -> Option<Account>`；`update_nickname(account_id, nickname)`；`update_avatar(account_id, avatar)`；`get_avatar(account_id) -> Option<Vec<u8>>`；`has_avatar(account_id) -> bool`；`#[cfg(test)] open_in_memory()`
+  - `db::Db`：`open(path) -> anyhow::Result<Db>`；`create_account(account, password_hash, nickname) -> Result<i64, DbError>`；`find_account(account) -> Option<Account>`；`insert_token(account_id, token) -> anyhow::Result<()>`（自动修剪到 8 条 + 清理过期）；`find_account_by_token(token) -> Option<Account>`（仅命中 24h 内使用过的，见 TOKEN_TTL_SECS）；`touch_token(token)`（滑动续期，Resume 成功时回写 last_used_at）；`update_nickname(account_id, nickname)`；`update_avatar(account_id, avatar)`；`get_avatar(account_id) -> Option<Vec<u8>>`；`#[cfg(test)] open_in_memory()`
   - `db::Account { id: i64, account: String, password_hash: String, nickname: String, has_avatar: bool }`；`db::DbError::{AccountExists, Other}`
   - `auth::AuthResult { account_id: i64, nickname: String, has_avatar: bool, auth_token: String }`
   - `auth::register(db, invite_cfg: Option<&str>, account, password, invite) -> Result<AuthResult, String>`
@@ -471,7 +471,7 @@ Expected: 四个依赖加入 `server/Cargo.toml` 的 `[dependencies]`（版本�
 `server/src/db.rs`（新建）：
 
 ```rust
-//! SQLite 持久层：账号、密码哈希、token（含 8 条修剪）；头像图片存文件系统
+//! SQLite 持久层：账号、密码哈希、token（含 8 条修剪与 24h 滑动过期）；头像图片存文件系统
 //! （<数据目录>/avatars/<account_id>.jpg），库内只留 has_avatar 标记。
 //! 单连接 + Mutex 串行化（6 人规模足够）；rusqlite bundled 把 SQLite 编进二进制。
 use std::path::{Path, PathBuf};
@@ -481,6 +481,9 @@ use rusqlite::{params, Connection};
 
 /// 每账号最多保留的 auth_token 条数（超出删最旧，支持换设备）
 pub const TOKEN_LIMIT: usize = 8;
+
+/// auth_token 有效期（秒）：超过此时长未使用即失效；每次使用滑动续期
+pub const TOKEN_TTL_SECS: i64 = 24 * 3600;
 
 /// 账号记录（has_avatar 为库内标记列：0 无头像 / 1 有头像）
 #[derive(Debug, Clone, PartialEq)]
@@ -562,11 +565,16 @@ impl Db {
                created_at    INTEGER NOT NULL
              );
              CREATE TABLE IF NOT EXISTS tokens (
-               token      TEXT PRIMARY KEY,
-               account_id INTEGER NOT NULL,
-               created_at INTEGER NOT NULL
+               token        TEXT PRIMARY KEY,
+               account_id   INTEGER NOT NULL,
+               created_at   INTEGER NOT NULL,
+               last_used_at INTEGER NOT NULL
              );",
         )?;
+        // 旧库迁移：补 last_used_at 列（列已存在时 duplicate column 报错，忽略）
+        let _ = conn.execute("ALTER TABLE tokens ADD COLUMN last_used_at INTEGER NOT NULL DEFAULT 0", []);
+        // 旧行回填：以创建时间作最后使用时间（新库无 0 值行，无影响）
+        conn.execute("UPDATE tokens SET last_used_at = created_at WHERE last_used_at = 0", [])?;
         Ok(())
     }
 
@@ -605,33 +613,50 @@ impl Db {
         .ok()
     }
 
-    /// 写入 auth_token 并修剪：每账号只保留最新 TOKEN_LIMIT 条（同秒以 rowid 兜底）
+    /// 写入 auth_token：插入即开始滑动计时；顺带清理该账号过期 token 并修剪到 TOKEN_LIMIT 条
     pub fn insert_token(&self, account_id: i64, token: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
+        let now = now_secs();
         conn.execute(
-            "INSERT INTO tokens (token, account_id, created_at) VALUES (?1, ?2, ?3)",
-            params![token, account_id, now_secs()],
+            "INSERT INTO tokens (token, account_id, created_at, last_used_at) VALUES (?1, ?2, ?3, ?3)",
+            params![token, account_id, now],
+        )?;
+        // 过期清理：失效 token 不再占 8 条额度
+        conn.execute(
+            "DELETE FROM tokens WHERE account_id = ?1 AND last_used_at <= ?2",
+            params![account_id, now - TOKEN_TTL_SECS],
         )?;
         conn.execute(
             "DELETE FROM tokens WHERE account_id = ?1 AND token NOT IN (
                SELECT token FROM tokens WHERE account_id = ?1
-               ORDER BY created_at DESC, rowid DESC LIMIT ?2
+               ORDER BY last_used_at DESC, rowid DESC LIMIT ?2
              )",
             params![account_id, TOKEN_LIMIT as i64],
         )?;
         Ok(())
     }
 
+    /// 按 token 查账号：仅命中 24h 内使用过的（使用即续期由 touch_token 完成）
     pub fn find_account_by_token(&self, token: &str) -> Option<Account> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT a.id, a.account, a.password_hash, a.nickname, a.has_avatar
              FROM tokens t JOIN accounts a ON a.id = t.account_id
-             WHERE t.token = ?1",
-            params![token],
+             WHERE t.token = ?1 AND t.last_used_at > ?2",
+            params![token, now_secs() - TOKEN_TTL_SECS],
             row_to_account,
         )
         .ok()
+    }
+
+    /// 滑动续期：使用 token 成功后回写最后使用时间（下一个 24h）
+    pub fn touch_token(&self, token: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE tokens SET last_used_at = ?1 WHERE token = ?2",
+            params![now_secs(), token],
+        )?;
+        Ok(())
     }
 
     pub fn update_nickname(&self, account_id: i64, nickname: &str) -> anyhow::Result<()> {
@@ -657,17 +682,6 @@ impl Db {
     /// 读头像文件（不存在 → None）
     pub fn get_avatar(&self, account_id: i64) -> Option<Vec<u8>> {
         std::fs::read(self.avatar_dir.join(format!("{account_id}.jpg"))).ok()
-    }
-
-    /// 是否有头像（读标记列，不碰文件）
-    pub fn has_avatar(&self, account_id: i64) -> bool {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT has_avatar FROM accounts WHERE id = ?1",
-            params![account_id],
-            |row| row.get::<_, bool>(0),
-        )
-        .unwrap_or(false)
     }
 }
 ```
@@ -720,12 +734,11 @@ mod tests {
     fn update_nickname_and_avatar() {
         let db = Db::open_in_memory();
         let id = db.create_account("alice", "h1", "alice").unwrap();
-        assert!(!db.has_avatar(id));
+        assert!(!db.find_account("alice").unwrap().has_avatar);
         db.update_nickname(id, "阿信").unwrap();
         assert_eq!(db.find_account("alice").unwrap().nickname, "阿信");
         let img = vec![1u8, 2, 3, 4, 5];
         db.update_avatar(id, &img).unwrap();
-        assert!(db.has_avatar(id));
         assert!(db.avatar_dir.join(format!("{id}.jpg")).exists(), "头像应落盘为文件");
         assert_eq!(db.get_avatar(id).unwrap(), img);
         assert!(db.find_account("alice").unwrap().has_avatar);
@@ -737,7 +750,66 @@ mod tests {
         let id = db.create_account("alice", "h1", "alice").unwrap();
         assert_eq!(db.get_avatar(id), None);
         assert_eq!(db.get_avatar(999), None);
-        assert!(!db.has_avatar(999));
+    }
+
+    #[test]
+    fn token_sliding_expiry() {
+        let db = Db::open_in_memory();
+        let id = db.create_account("alice", "h1", "alice").unwrap();
+        db.insert_token(id, "tok").unwrap();
+        assert!(db.find_account_by_token("tok").is_some());
+        // 模拟超过 24h 未使用 → 过期
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE tokens SET last_used_at = ?1 WHERE token = 'tok'",
+                params![now_secs() - TOKEN_TTL_SECS - 60],
+            )
+            .unwrap();
+        }
+        assert!(db.find_account_by_token("tok").is_none(), "超 24h 未使用应失效");
+        // 使用即续期：touch 后重新有效
+        db.touch_token("tok").unwrap();
+        assert!(db.find_account_by_token("tok").is_some(), "touch 后应恢复有效");
+    }
+
+    #[test]
+    fn insert_token_cleans_expired() {
+        let db = Db::open_in_memory();
+        let id = db.create_account("alice", "h1", "alice").unwrap();
+        db.insert_token(id, "old-a").unwrap();
+        db.insert_token(id, "old-b").unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE tokens SET last_used_at = ?1", params![now_secs() - TOKEN_TTL_SECS - 60])
+                .unwrap();
+        }
+        db.insert_token(id, "new").unwrap();
+        let cnt: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM tokens WHERE account_id = ?1", params![id], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(cnt, 1, "过期 token 应在插入时被清理，只留新的");
+        assert!(db.find_account_by_token("new").is_some());
+    }
+
+    #[test]
+    fn legacy_tokens_table_migrates() {
+        // 模拟旧库：tokens 表无 last_used_at 列
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tokens (token TEXT PRIMARY KEY, account_id INTEGER NOT NULL, created_at INTEGER NOT NULL);
+             INSERT INTO tokens VALUES ('legacy', 1, 12345);",
+        )
+        .unwrap();
+        let db = Db::with_conn(conn, std::env::temp_dir().join("echoroom-test-migrate-avatars")).unwrap();
+        let last: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT last_used_at FROM tokens WHERE token = 'legacy'", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(last, 12345, "旧行应回填 last_used_at = created_at");
     }
 }
 ```
@@ -868,11 +940,13 @@ pub fn login(db: &Db, account: &str, password: &str) -> Result<AuthResult, Strin
     })
 }
 
-/// 自动登录：token 换身份（失效 → 客户端回登录页）
+/// 自动登录：token 换身份（失效/超 24h 未用 → 客户端回登录页）
 pub fn resume(db: &Db, auth_token: &str) -> Result<AuthResult, String> {
     let Some(acc) = db.find_account_by_token(auth_token) else {
         return Err("登录已过期".into());
     };
+    // 滑动续期：本次使用成功即刷新 24h 有效期（活跃则可持续免登）
+    db.touch_token(auth_token).map_err(|e| format!("服务器错误：{e}"))?;
     Ok(AuthResult {
         account_id: acc.id,
         nickname: acc.nickname,
@@ -1876,7 +1950,7 @@ Expected: 全绿——db 5 个 + auth 5 个 + room 10 个（原 9 个更新 + �
   - 事件：`auth_ok`（无 payload：认证成功）、`auth_fail`（reason 字符串：已停止重连交还 UI）、`profile_error`（reason 字符串）、`profile_changed`（`{uid, nickname}`）、`avatar_data`（`{uid, data: number[]}`，空数组 = 无头像）；`members` 变五元组、`member_join` 变 `(uid, nickname, has_avatar)` 三元组
   - config.json 新字段：`account`、`auth_token`（旧 `nickname` 字段被 serde 忽略，兼容旧配置文件）
 
-- [ ] **Step 1: config.rs——账号与自动登录凭证字段**
+- [x] **Step 1: config.rs——账号与自动登录凭证字段**
 
 `client/src-tauri/src/config.rs` 按以下 4 处修改。
 
@@ -1964,7 +2038,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: net/tcp.rs——AuthMode 三态与全量重写**
+- [x] **Step 2: net/tcp.rs——AuthMode 三态与全量重写**
 
 `client/src-tauri/src/net/tcp.rs` 全文件替换为：
 
@@ -2296,7 +2370,7 @@ fn run_session(
 }
 ```
 
-- [ ] **Step 3: bridge.rs——认证命令与事件出口**
+- [x] **Step 3: bridge.rs——认证命令与事件出口**
 
 `client/src-tauri/src/bridge.rs` 按以下 6 处修改。
 
@@ -2510,7 +2584,7 @@ pub fn avatar_request(state: State<AppState>, uid: u16) -> Result<(), String> {
 
 （`is_web_url` 及其测试、其余命令保持原样不动。）
 
-- [ ] **Step 4: lib.rs——命令注册更新**
+- [x] **Step 4: lib.rs——命令注册更新**
 
 `client/src-tauri/src/lib.rs` 的 invoke_handler 列表替换：
 ```rust
@@ -2531,7 +2605,7 @@ pub fn avatar_request(state: State<AppState>, uid: u16) -> Result<(), String> {
             bridge::avatar_request,
 ```
 
-- [ ] **Step 5: 全 workspace 测试与编译验证（断裂窗口关闭）**
+- [x] **Step 5: 全 workspace 测试与编译验证（断裂窗口关闭）**
 
 Run: `cargo test`
 Expected: 全绿——protocol（Task 1 测例）+ server（db/auth/room）+ client（config 2 个 + bridge is_web_url 2 个）；至此 Task 1 引入的跨包断裂全部修复。
