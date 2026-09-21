@@ -16,24 +16,36 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(b);
 }
 
+/// bytes 字段：[len u32][原始字节]（头像等大块二进制；u16 前缀不够 64KB 上限）
+fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
+    out.extend_from_slice(&(b.len() as u32).to_be_bytes());
+    out.extend_from_slice(b);
+}
+
 pub fn encode(msg: &TcpMessage) -> Vec<u8> {
     let mut payload = Vec::new();
     match msg {
-        TcpMessage::Login { nickname } => put_str(&mut payload, nickname),
-        TcpMessage::LoginOk { uid, token, members } => {
+        TcpMessage::Login { account, password } => {
+            put_str(&mut payload, account);
+            put_str(&mut payload, password);
+        }
+        TcpMessage::LoginOk { uid, udp_token, auth_token, members } => {
             payload.extend_from_slice(&uid.to_be_bytes());
-            payload.extend_from_slice(&token.to_be_bytes());
+            payload.extend_from_slice(&udp_token.to_be_bytes());
+            put_str(&mut payload, auth_token);
             payload.extend_from_slice(&(members.len() as u16).to_be_bytes());
-            for (uid, name, muted, streams) in members {
+            for (uid, name, muted, streams, has_avatar) in members {
                 payload.extend_from_slice(&uid.to_be_bytes());
                 put_str(&mut payload, name);
                 payload.push(if *muted { 1 } else { 0 });
                 payload.push(*streams);
+                payload.push(if *has_avatar { 1 } else { 0 });
             }
         }
-        TcpMessage::MemberJoin { uid, nickname } => {
+        TcpMessage::MemberJoin { uid, nickname, has_avatar } => {
             payload.extend_from_slice(&uid.to_be_bytes());
             put_str(&mut payload, nickname);
+            payload.push(if *has_avatar { 1 } else { 0 });
         }
         TcpMessage::MemberLeave { uid } => payload.extend_from_slice(&uid.to_be_bytes()),
         TcpMessage::Chat { uid, text } => {
@@ -64,7 +76,32 @@ pub fn encode(msg: &TcpMessage) -> Vec<u8> {
                 payload.extend_from_slice(&uid.to_be_bytes());
             }
         }
-        TcpMessage::LoginReject { reason } => put_str(&mut payload, reason),
+        TcpMessage::AuthReject { reason } => put_str(&mut payload, reason),
+        TcpMessage::Register { account, password, invite } => {
+            put_str(&mut payload, account);
+            put_str(&mut payload, password);
+            put_str(&mut payload, invite);
+        }
+        TcpMessage::Resume { auth_token } => put_str(&mut payload, auth_token),
+        TcpMessage::SetProfile { nickname, avatar } => {
+            put_str(&mut payload, nickname);
+            match avatar {
+                Some(b) => {
+                    payload.push(1);
+                    put_bytes(&mut payload, b);
+                }
+                None => payload.push(0),
+            }
+        }
+        TcpMessage::ProfileChanged { uid, nickname } => {
+            payload.extend_from_slice(&uid.to_be_bytes());
+            put_str(&mut payload, nickname);
+        }
+        TcpMessage::AvatarRequest { uid } => payload.extend_from_slice(&uid.to_be_bytes()),
+        TcpMessage::AvatarData { uid, data } => {
+            payload.extend_from_slice(&uid.to_be_bytes());
+            put_bytes(&mut payload, data);
+        }
     }
     let mut out = Vec::with_capacity(5 + payload.len());
     out.extend_from_slice(&((payload.len() + 1) as u32).to_be_bytes());
@@ -120,6 +157,13 @@ impl<'a> Reader<'a> {
         self.pos += len;
         Ok(s)
     }
+    fn bytes(&mut self) -> Result<Vec<u8>, FieldErr> {
+        let len = self.u32()? as usize;
+        self.need(len)?;
+        let b = self.buf[self.pos..self.pos + len].to_vec();
+        self.pos += len;
+        Ok(b)
+    }
 }
 
 /// 尝试从缓冲区头部解码一条消息。
@@ -129,7 +173,8 @@ pub fn try_decode(buf: &[u8]) -> Result<Option<(TcpMessage, usize)>, DecodeError
         return Ok(None);
     }
     let len = u32::from_be_bytes(buf[0..4].try_into().unwrap()) as usize;
-    if len < 1 || len > 64 * 1024 {
+    // 上限 256KB：容纳头像单帧（≤64KB BLOB + 头部）与成员列表余量
+    if len < 1 || len > 256 * 1024 {
         return Err(DecodeError::UnknownType(0)); // 长度异常：视为协议错误
     }
     if buf.len() < 4 + len {
@@ -150,10 +195,14 @@ pub fn try_decode(buf: &[u8]) -> Result<Option<(TcpMessage, usize)>, DecodeError
     }
 
     let msg = match type_id {
-        1 => TcpMessage::Login { nickname: field!(r.string()) },
+        1 => {
+            let account = field!(r.string());
+            TcpMessage::Login { account, password: field!(r.string()) }
+        }
         2 => {
             let uid = field!(r.u16());
-            let token = field!(r.u32());
+            let udp_token = field!(r.u32());
+            let auth_token = field!(r.string());
             let count = field!(r.u16()) as usize;
             let mut members = Vec::with_capacity(count.min(64));
             for _ in 0..count {
@@ -161,13 +210,15 @@ pub fn try_decode(buf: &[u8]) -> Result<Option<(TcpMessage, usize)>, DecodeError
                 let name = field!(r.string());
                 let muted = field!(r.u8()) != 0;
                 let streams = field!(r.u8());
-                members.push((m_uid, name, muted, streams));
+                let has_avatar = field!(r.u8()) != 0;
+                members.push((m_uid, name, muted, streams, has_avatar));
             }
-            TcpMessage::LoginOk { uid, token, members }
+            TcpMessage::LoginOk { uid, udp_token, auth_token, members }
         }
         3 => {
             let uid = field!(r.u16());
-            TcpMessage::MemberJoin { uid, nickname: field!(r.string()) }
+            let nickname = field!(r.string());
+            TcpMessage::MemberJoin { uid, nickname, has_avatar: field!(r.u8()) != 0 }
         }
         4 => TcpMessage::MemberLeave { uid: field!(r.u16()) },
         5 => {
@@ -178,7 +229,7 @@ pub fn try_decode(buf: &[u8]) -> Result<Option<(TcpMessage, usize)>, DecodeError
             let uid = field!(r.u16());
             TcpMessage::Speaking { uid, on: field!(r.u8()) != 0 }
         }
-        7 => TcpMessage::LoginReject { reason: field!(r.string()) },
+        7 => TcpMessage::AuthReject { reason: field!(r.string()) },
         8 => {
             let uid = field!(r.u16());
             TcpMessage::Mute { uid, on: field!(r.u8()) != 0 }
@@ -209,6 +260,27 @@ pub fn try_decode(buf: &[u8]) -> Result<Option<(TcpMessage, usize)>, DecodeError
             let uid = field!(r.u16());
             TcpMessage::RequestKeyframe { uid, target: field!(r.u16()) }
         }
+        15 => {
+            let account = field!(r.string());
+            let password = field!(r.string());
+            TcpMessage::Register { account, password, invite: field!(r.string()) }
+        }
+        16 => TcpMessage::Resume { auth_token: field!(r.string()) },
+        17 => {
+            let nickname = field!(r.string());
+            let has_avatar = field!(r.u8()) != 0;
+            let avatar = if has_avatar { Some(field!(r.bytes())) } else { None };
+            TcpMessage::SetProfile { nickname, avatar }
+        }
+        18 => {
+            let uid = field!(r.u16());
+            TcpMessage::ProfileChanged { uid, nickname: field!(r.string()) }
+        }
+        19 => TcpMessage::AvatarRequest { uid: field!(r.u16()) },
+        20 => {
+            let uid = field!(r.u16());
+            TcpMessage::AvatarData { uid, data: field!(r.bytes()) }
+        }
         other => return Err(DecodeError::UnknownType(other)),
     };
     Ok(Some((msg, 4 + len)))
@@ -222,13 +294,14 @@ mod tests {
     #[test]
     fn roundtrip_all_variants() {
         let samples = vec![
-            TcpMessage::Login { nickname: "阿信".into() },
+            TcpMessage::Login { account: "alice".into(), password: "secret123".into() },
             TcpMessage::LoginOk {
                 uid: 3,
-                token: 0xDEAD_BEEF,
-                members: vec![(1, "小K".into(), false, 0), (2, "你".into(), true, 0b11)],
+                udp_token: 0xDEAD_BEEF,
+                auth_token: "0123456789abcdef0123456789abcdef".into(),
+                members: vec![(1, "小K".into(), false, 0, true), (2, "你".into(), true, 0b11, false)],
             },
-            TcpMessage::MemberJoin { uid: 5, nickname: "新来的".into() },
+            TcpMessage::MemberJoin { uid: 5, nickname: "新来的".into(), has_avatar: true },
             TcpMessage::MemberLeave { uid: 2 },
             TcpMessage::Chat { uid: 1, text: "晚上开黑吗".into() },
             TcpMessage::Speaking { uid: 4, on: true },
@@ -241,7 +314,15 @@ mod tests {
             TcpMessage::Viewers { uids: vec![1, 2, 3] },
             TcpMessage::Viewers { uids: vec![] },
             TcpMessage::RequestKeyframe { uid: 0, target: 4 },
-            TcpMessage::LoginReject { reason: "房间已满（6人）".into() },
+            TcpMessage::AuthReject { reason: "账号或密码错误".into() },
+            TcpMessage::Register { account: "bob".into(), password: "pw123456".into(), invite: "echo-2026".into() },
+            TcpMessage::Resume { auth_token: "deadbeef".into() },
+            TcpMessage::SetProfile { nickname: "阿信".into(), avatar: None },
+            TcpMessage::SetProfile { nickname: "阿信".into(), avatar: Some(vec![0xFF, 0xD8, 0xFF, 0xE0]) },
+            TcpMessage::ProfileChanged { uid: 3, nickname: "阿信".into() },
+            TcpMessage::AvatarRequest { uid: 3 },
+            TcpMessage::AvatarData { uid: 3, data: vec![] },
+            TcpMessage::AvatarData { uid: 3, data: vec![1, 2, 3, 4] },
         ];
         for msg in samples {
             let bytes = encode(&msg);
@@ -252,8 +333,18 @@ mod tests {
     }
 
     #[test]
+    fn avatar_data_roundtrip_64kb() {
+        // 头像上限 64KB：单帧必须可编码可解码（长度上限 256KB 之内）
+        let msg = TcpMessage::AvatarData { uid: 7, data: vec![0xAB; 64 * 1024] };
+        let bytes = encode(&msg);
+        let (decoded, n) = try_decode(&bytes).unwrap().unwrap();
+        assert_eq!(decoded, msg);
+        assert_eq!(n, bytes.len());
+    }
+
+    #[test]
     fn partial_data_returns_none() {
-        let bytes = encode(&TcpMessage::Login { nickname: "abc".into() });
+        let bytes = encode(&TcpMessage::Login { account: "abc".into(), password: "x".into() });
         for cut in 0..bytes.len() {
             assert!(try_decode(&bytes[..cut]).unwrap().is_none(), "cut={cut} 应等待更多数据");
         }

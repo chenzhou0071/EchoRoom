@@ -4,14 +4,17 @@
 pub const STREAM_SCREEN: u8 = 0;
 pub const STREAM_CAMERA: u8 = 1;
 
+/// 在线成员元组：(uid, 昵称, 是否静音, 流位图, 是否有头像)
+pub type MemberInfo = (u16, String, bool, u8, bool);
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TcpMessage {
-    /// C→S：进入房间
-    Login { nickname: String },
-    /// S→C：登录成功（uid、token、已有成员；成员 = (uid, 昵称, 是否静音, 流位图)）
-    LoginOk { uid: u16, token: u32, members: Vec<(u16, String, bool, u8)> },
+    /// C→S：登录（认证成功即进房）
+    Login { account: String, password: String },
+    /// S→C：认证成功（`auth_token` 供下次自动登录；`udp_token` 绑定 UDP 地址；members 含自己）
+    LoginOk { uid: u16, udp_token: u32, auth_token: String, members: Vec<MemberInfo> },
     /// S→C：有成员加入
-    MemberJoin { uid: u16, nickname: String },
+    MemberJoin { uid: u16, nickname: String, has_avatar: bool },
     /// S→C：有成员离开
     MemberLeave { uid: u16 },
     /// C→S（uid 填 0）公屏消息；S→C（uid 为发送者）广播
@@ -32,8 +35,20 @@ pub enum TcpMessage {
     Viewers { uids: Vec<u16> },
     /// 双向：C→S（uid 填 0）请求目标发关键帧；S→C 转发（uid 为请求者）
     RequestKeyframe { uid: u16, target: u16 },
-    /// S→C：房间满等拒绝原因
-    LoginReject { reason: String },
+    /// S→C：认证被拒（未进房 = 断开；已进房 = 资料更新失败提示）；也用于房间满
+    AuthReject { reason: String },
+    /// C→S：注册（成功即进房，昵称 = 账号名）
+    Register { account: String, password: String, invite: String },
+    /// C→S：自动登录
+    Resume { auth_token: String },
+    /// C→S：更新资料（`avatar` = None 表示不改头像）
+    SetProfile { nickname: String, avatar: Option<Vec<u8>> },
+    /// S→C 广播：昵称变更（头像变化由前端重拉 AvatarData 感知）
+    ProfileChanged { uid: u16, nickname: String },
+    /// C→S：请求某人的头像（懒加载）
+    AvatarRequest { uid: u16 },
+    /// S→C：头像数据（data 为空 = 无头像）
+    AvatarData { uid: u16, data: Vec<u8> },
 }
 
 impl TcpMessage {
@@ -45,7 +60,7 @@ impl TcpMessage {
             TcpMessage::MemberLeave { .. } => 4,
             TcpMessage::Chat { .. } => 5,
             TcpMessage::Speaking { .. } => 6,
-            TcpMessage::LoginReject { .. } => 7,
+            TcpMessage::AuthReject { .. } => 7,
             TcpMessage::Mute { .. } => 8,
             TcpMessage::Muted { .. } => 9,
             TcpMessage::StreamState { .. } => 10,
@@ -53,6 +68,12 @@ impl TcpMessage {
             TcpMessage::Unsubscribe { .. } => 12,
             TcpMessage::Viewers { .. } => 13,
             TcpMessage::RequestKeyframe { .. } => 14,
+            TcpMessage::Register { .. } => 15,
+            TcpMessage::Resume { .. } => 16,
+            TcpMessage::SetProfile { .. } => 17,
+            TcpMessage::ProfileChanged { .. } => 18,
+            TcpMessage::AvatarRequest { .. } => 19,
+            TcpMessage::AvatarData { .. } => 20,
         }
     }
 }
