@@ -14,7 +14,7 @@
 - 三个目标并重：**身份稳定 + 头像**（换设备/重装后仍是"你"）、**防冒名**（账号+密码保证身份唯一）、**完成度与体验**（正式登录/注册流程）
 - **无游客模式**：彻底移除"输入昵称即连接"，必须账号进入（原 `Login{nickname}` 删除）
 - 注册流程：**账号 + 密码 + 邀请码** → 注册成功即进房 → 客户端弹「完善资料」窗（昵称 + 头像，可跳过）
-- **账号与昵称分离**：账号（登录凭证，全服唯一，统一小写存储/比较）；昵称（展示用，**允许重复**，默认=账号名）
+- **账号与昵称分离**：账号（登录凭证，全服唯一，大小写敏感、原样存储与精确匹配）；昵称（展示用，**允许重复**，默认=账号名）
 - **头像 = 上传本地图片**：客户端缩图（256×256 居中裁剪、JPEG q85）后上传，服务器存储；不传则显示默认剪影
 - **邀请码制**：服务器配置注册码；未配置时拒绝一切注册（"未开放注册"）
 
@@ -51,7 +51,8 @@
 
 | 决策 | 结论 | 理由 |
 |------|------|------|
-| 存储引擎 | **SQLite（rusqlite，bundled）**，头像 BLOB 入库 | 用户选定；bundled 把 SQLite 编进二进制，服务器免装；事务安全、扩展性好 |
+| 存储引擎 | **SQLite（rusqlite，bundled）** | 用户选定；bundled 把 SQLite 编进二进制，服务器免装；事务安全、扩展性好 |
+| 头像存储 | **文件系统**：`data/avatars/{id}.jpg`，DB 仅存 `has_avatar` 标记（0/1） | 图片可直接查看/导出，DB 保持纯元数据；写序=先写文件后置标记，最坏留孤儿文件（无害） |
 | 密码存储 | **argon2id**（`argon2` crate，PHC 字符串自带盐与参数） | 业界标准，纯 Rust；2C2G 上单次 ~20-50ms 可接受 |
 | token 生成 | **真随机**（`rand` OsRng，16 字节 → 32 位 hex） | 现有 LCG 可预测，绝不能用于身份凭证；顺手把 UDP token 的 LCG 也换掉 |
 | 多设备 | 每账号最多 **8 条** token，超出删最旧；同账号可多机同时在线（各自 uid） | "换设备"是账号系统的核心动机之一 |
@@ -60,7 +61,7 @@
 | 头像传输 | **懒加载**：成员元组带 `has_avatar` 标记，前端按需 `AvatarRequest` 拉取 | 避免进房/成员事件广播大块二进制；换头像后重拉即刷新 |
 | 头像限制 | 单张 **≤64KB**（客户端缩 256×256 JPEG q85 一般 10-30KB）；服务器二次校验 | 帧内 bytes 字段可控，渲染开销恒定 |
 | 邀请码 | 服务器 `--invite` 参数；**未配置 = 拒绝一切注册** | 公网 IP 会被扫描机器人扫到，默认最安全 |
-| 账号格式 | `[A-Za-z0-9_]{3,20}`，统一小写存储与比较 | 防 `Alice`/`alice` 抢注混淆；密码 6-64 字符、大小写敏感 |
+| 账号格式 | `[A-Za-z0-9][A-Za-z0-9_]{2,19}`（3-20 位、不能以 `_` 开头），原样存储、大小写敏感（`Alice` 与 `alice` 为两个独立账号） | 用户确认：不同大小写视为不同账号、不能以 `_` 开头；密码 6-64 字符、大小写敏感 |
 | 昵称规则 | 1-24 字符，允许重复，默认=账号名 | 用户确认：昵称纯展示，账号才是身份 |
 
 ## 3. 协议改动（`protocol/src/messages.rs`）
@@ -99,10 +100,10 @@
 ```sql
 CREATE TABLE IF NOT EXISTS accounts (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  account       TEXT NOT NULL UNIQUE,      -- 小写存储
+  account       TEXT NOT NULL UNIQUE,      -- 原样存储（大小写敏感）
   password_hash TEXT NOT NULL,             -- argon2 PHC 字符串
   nickname      TEXT NOT NULL,             -- 默认=账号名
-  avatar        BLOB,                      -- NULL = 无头像
+  has_avatar    INTEGER NOT NULL DEFAULT 0,  -- 0 无头像 / 1 有头像
   created_at    INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tokens (
@@ -116,7 +117,7 @@ CREATE TABLE IF NOT EXISTS tokens (
 
 **`server/src/auth.rs`（新）**：注册/登录/Resume/资料更新的业务逻辑与格式校验（账号、密码、昵称、邀请码、头像大小），错误原因文案：
 
-- 注册/资料：`邀请码错误` / `账号已存在` / `账号格式不合法（3-20 位字母数字下划线）` / `密码至少 6 位` / `昵称不合法（1-24 字符）` / `未开放注册` / `头像过大（上限 64KB）`
+- 注册/资料：`邀请码错误` / `账号已存在` / `账号格式不合法（3-20 位字母数字下划线，不能以 _ 开头）` / `密码至少 6 位` / `昵称不合法（1-24 字符）` / `未开放注册` / `头像过大（上限 64KB）`
 - 登录：统一 `账号或密码错误`（不泄露账号是否存在）
 - Resume：`登录已过期`（客户端回登录页）
 
@@ -130,7 +131,7 @@ CREATE TABLE IF NOT EXISTS tokens (
 
 - `read_first_auth`：三条认证路径 → 成功时组装 `LoginOk` 并进入现有读/写循环（后续消息处理不动）
 - `SetProfile`：更新 DB（昵称/头像）→ 更新 `Room` 成员昵称/头像标记 → 广播 `ProfileChanged`
-- `AvatarRequest`：按 uid 查 `account_id` → DB 取 BLOB → 定向回 `AvatarData`
+- `AvatarRequest`：按 uid 查 `account_id` → 读头像文件（`data/avatars/{id}.jpg`）→ 定向回 `AvatarData`
 
 ## 5. 客户端改动
 

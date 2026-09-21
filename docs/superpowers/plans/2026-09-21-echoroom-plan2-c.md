@@ -4,7 +4,7 @@
 
 **Goal:** 为 EchoRoom 引入账号体系：账号+密码（argon2id）注册/登录、邀请码准入、SQLite 持久化（昵称/头像存服务器）、auth_token 自动登录、头像上传与懒加载渲染——身份从一次性昵称升级为持久账号，认证成功即进房。
 
-**Architecture:** 账号持久化进 SQLite（服务器 `data/echoroom.db`），在线成员仍是内存 `Room`。TCP 连接首消息由"直接发昵称"改为 **Register / Login / Resume 三选一**，服务器查库校验通过后直接 join 房间（登录与进房合一）。登录/注册成功下发 `auth_token`（自动登录）与会话专用 `udp_token` 两个独立凭证。头像走懒加载：成员五元组带 `has_avatar` 标记，前端按需 `AvatarRequest` 拉取 `AvatarData`（≤64KB BLOB）。
+**Architecture:** 账号持久化进 SQLite（服务器 `data/echoroom.db`），在线成员仍是内存 `Room`。TCP 连接首消息由"直接发昵称"改为 **Register / Login / Resume 三选一**，服务器查库校验通过后直接 join 房间（登录与进房合一）。登录/注册成功下发 `auth_token`（自动登录）与会话专用 `udp_token` 两个独立凭证。头像走懒加载：成员五元组带 `has_avatar` 标记，前端按需 `AvatarRequest` 拉取 `AvatarData`（≤64KB；服务器把图片存文件系统 `data/avatars/{id}.jpg`，DB 内只留标记）。
 
 **Tech Stack:** Rust（protocol / server / client 三包；server 新增 `rusqlite`(bundled) / `argon2` / `rand@0.8` / `anyhow`）+ Tauri v2（`withGlobalTauri`）+ 原生 HTML/CSS/JS（无构建工具）。
 
@@ -13,9 +13,9 @@
 - 协议改造：TCP type 1 `Login{account,password}`（替换 `{nickname}`）、2 `LoginOk{uid,udp_token,auth_token,members}`（字段重命名，members 含自己）、7 `LoginReject`→`AuthReject{reason}`（改名复用）；新增 15 `Register{account,password,invite}`、16 `Resume{auth_token}`、17 `SetProfile{nickname,avatar:Option<Vec<u8>>}`、18 `ProfileChanged{uid,nickname}`、19 `AvatarRequest{uid}`、20 `AvatarData{uid,data}`
 - 成员元组全局五元组 `(uid, nickname, muted, streams, has_avatar)`；`MemberJoin` 同步加 `has_avatar: bool`
 - bytes 字段编码 `[len u32][原始字节]`；`try_decode` 长度上限由 `64*1024` 提高到 `256*1024`（容纳头像单帧）
-- 账号 `[A-Za-z0-9_]{3,20}` 统一小写存储/比较；密码 6–64 字符（大小写敏感）；昵称 1–24 字符（允许重复，默认=账号名）；头像 ≤64KB（客户端缩 256×256 居中裁剪 JPEG q85）
+- 账号 `[A-Za-z0-9][A-Za-z0-9_]{2,19}`（3-20 位、不能以 `_` 开头）原样存储、大小写敏感（`Alice` 与 `alice` 是两个独立账号）；密码 6–64 字符（大小写敏感）；昵称 1–24 字符（允许重复，默认=账号名）；头像 ≤64KB（客户端缩 256×256 居中裁剪 JPEG q85）
 - 每账号最多 8 条 auth_token（超出删最旧）；auth_token = 16 字节真随机 → 32 位 hex；UDP token 同步换真随机（`rand::rngs::OsRng`）
-- 错误文案（服务器下发，客户端原样展示）：`未开放注册` / `邀请码错误` / `账号已存在` / `账号格式不合法（3-20 位字母数字下划线）` / `密码至少 6 位` / `密码过长（上限 64 字符）` / `昵称不合法（1-24 字符）` / `头像过大（上限 64KB）`；登录统一 `账号或密码错误`（不泄露账号是否存在）；Resume 失效 `登录已过期`；房间满 `房间已满（6人）`
+- 错误文案（服务器下发，客户端原样展示）：`未开放注册` / `邀请码错误` / `账号已存在` / `账号格式不合法（3-20 位字母数字下划线，不能以 _ 开头）` / `密码至少 6 位` / `密码过长（上限 64 字符）` / `昵称不合法（1-24 字符）` / `头像过大（上限 64KB）`；登录统一 `账号或密码错误`（不泄露账号是否存在）；Resume 失效 `登录已过期`；房间满 `房间已满（6人）`
 - 服务器参数：位置参数 port（默认 9000）、`--data <目录>`（默认 `./data`，DB = `<data>/echoroom.db`，启动自动建目录/建表）、`--invite <码>`（未配置 = 拒绝一切注册）
 - ⚠ C 为协议**破坏性升级**（复用 type 1/2/7 改语义），无法像 B 那样逐任务保持编译全绿：**Task 1 结束时仅 `echoroom-protocol` 可测（server/client 编译断裂属预期状态）**；Task 2 结束 server 恢复可测；Task 3 结束 workspace 恢复全绿。Task 1–2 期间不要试图在包之间来回打补丁，按任务顺序推进即可
 - Task 3 起每个任务结束时全 workspace 编译通过、已有测试全绿
@@ -30,7 +30,7 @@
 - `protocol/src/tcp.rs`：bytes 字段编解码、全部新消息序列化、长度上限 256KB、往返测试
 
 **server**（服务器）
-- `server/src/db.rs`（新）：SQLite 持久层（建表 / 账号 CRUD / token 修剪 / 头像 BLOB）
+- `server/src/db.rs`（新）：SQLite 持久层（建表 / 账号 CRUD / token 修剪 / 头像文件读写）
 - `server/src/auth.rs`（新）：格式校验、argon2id 哈希与验证、token 生成、注册/登录/Resume/资料更新业务
 - `server/src/room.rs`：`Member.account_id`/`has_avatar`、`join` 五元组、`update_nickname`/`set_has_avatar`/`account_id_of`、UDP token 换真随机
 - `server/src/tcp.rs`：`read_first_auth` 三路认证、`SetProfile`/`AvatarRequest` 处理、`LoginOk` 组装含自己
@@ -471,9 +471,10 @@ Expected: 四个依赖加入 `server/Cargo.toml` 的 `[dependencies]`（版本�
 `server/src/db.rs`（新建）：
 
 ```rust
-//! SQLite 持久层：账号、密码哈希、token（含 8 条修剪）、头像 BLOB。
+//! SQLite 持久层：账号、密码哈希、token（含 8 条修剪）；头像图片存文件系统
+//! （<数据目录>/avatars/<account_id>.jpg），库内只留 has_avatar 标记。
 //! 单连接 + Mutex 串行化（6 人规模足够）；rusqlite bundled 把 SQLite 编进二进制。
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
@@ -481,7 +482,7 @@ use rusqlite::{params, Connection};
 /// 每账号最多保留的 auth_token 条数（超出删最旧，支持换设备）
 pub const TOKEN_LIMIT: usize = 8;
 
-/// 账号记录（has_avatar 由 `avatar IS NOT NULL` 派生）
+/// 账号记录（has_avatar 为库内标记列：0 无头像 / 1 有头像）
 #[derive(Debug, Clone, PartialEq)]
 pub struct Account {
     pub id: i64,
@@ -491,6 +492,7 @@ pub struct Account {
     pub has_avatar: bool,
 }
 
+#[derive(Debug)]
 pub enum DbError {
     /// 账号 UNIQUE 约束冲突（并发注册兜底）
     AccountExists,
@@ -499,6 +501,8 @@ pub enum DbError {
 
 pub struct Db {
     conn: Mutex<Connection>,
+    /// 头像文件目录（`<db 文件所在目录>/avatars/<account_id>.jpg`）
+    avatar_dir: PathBuf,
 }
 
 fn now_secs() -> i64 {
@@ -519,23 +523,31 @@ fn row_to_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
 }
 
 impl Db {
-    /// 打开（或创建）数据库文件并确保表结构；父目录自动创建
+    /// 打开（或创建）数据库文件并确保表结构；父目录与头像目录自动创建
     pub fn open(path: &Path) -> anyhow::Result<Db> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let conn = Connection::open(path)?;
-        let db = Db { conn: Mutex::new(conn) };
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(dir)?;
+        Db::with_conn(Connection::open(path)?, dir.join("avatars"))
+    }
+
+    /// 组装 Db：建头像目录 + 初始化表结构
+    fn with_conn(conn: Connection, avatar_dir: PathBuf) -> anyhow::Result<Db> {
+        std::fs::create_dir_all(&avatar_dir)?;
+        let db = Db { conn: Mutex::new(conn), avatar_dir };
         db.init_schema()?;
         Ok(db)
     }
 
-    /// 内存库（测试用；auth.rs 的测试也复用）
+    /// 内存库（测试用；auth.rs 的测试也复用）；头像落盘临时目录（pid + 纳秒命名，互不干扰）
     #[cfg(test)]
     pub fn open_in_memory() -> Db {
-        let db = Db { conn: Mutex::new(Connection::open_in_memory().unwrap()) };
-        db.init_schema().unwrap();
-        db
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let name = format!("echoroom-test-avatars-{}-{nanos}", std::process::id());
+        Db::with_conn(Connection::open_in_memory().unwrap(), std::env::temp_dir().join(name))
+            .unwrap()
     }
 
     fn init_schema(&self) -> anyhow::Result<()> {
@@ -546,7 +558,7 @@ impl Db {
                account       TEXT NOT NULL UNIQUE,
                password_hash TEXT NOT NULL,
                nickname      TEXT NOT NULL,
-               avatar        BLOB,
+               has_avatar    INTEGER NOT NULL DEFAULT 0,
                created_at    INTEGER NOT NULL
              );
              CREATE TABLE IF NOT EXISTS tokens (
@@ -567,8 +579,8 @@ impl Db {
     ) -> Result<i64, DbError> {
         let conn = self.conn.lock().unwrap();
         let r = conn.execute(
-            "INSERT INTO accounts (account, password_hash, nickname, avatar, created_at)
-             VALUES (?1, ?2, ?3, NULL, ?4)",
+            "INSERT INTO accounts (account, password_hash, nickname, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
             params![account, password_hash, nickname, now_secs()],
         );
         match r {
@@ -585,7 +597,7 @@ impl Db {
     pub fn find_account(&self, account: &str) -> Option<Account> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, account, password_hash, nickname, avatar IS NOT NULL
+            "SELECT id, account, password_hash, nickname, has_avatar
              FROM accounts WHERE account = ?1",
             params![account],
             row_to_account,
@@ -613,7 +625,7 @@ impl Db {
     pub fn find_account_by_token(&self, token: &str) -> Option<Account> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT a.id, a.account, a.password_hash, a.nickname, a.avatar IS NOT NULL
+            "SELECT a.id, a.account, a.password_hash, a.nickname, a.has_avatar
              FROM tokens t JOIN accounts a ON a.id = t.account_id
              WHERE t.token = ?1",
             params![token],
@@ -631,30 +643,27 @@ impl Db {
         Ok(())
     }
 
+    /// 写头像文件后置库内标记；顺序=先文件后库（最坏留孤儿文件，无害；下次上传覆盖）
     pub fn update_avatar(&self, account_id: i64, avatar: &[u8]) -> anyhow::Result<()> {
+        std::fs::write(self.avatar_dir.join(format!("{account_id}.jpg")), avatar)?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE accounts SET avatar = ?1 WHERE id = ?2",
-            params![avatar, account_id],
+            "UPDATE accounts SET has_avatar = 1 WHERE id = ?1",
+            params![account_id],
         )?;
         Ok(())
     }
 
-    /// 取头像 BLOB（NULL / 无此账号 → None）
+    /// 读头像文件（不存在 → None）
     pub fn get_avatar(&self, account_id: i64) -> Option<Vec<u8>> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT avatar FROM accounts WHERE id = ?1", params![account_id], |row| {
-            row.get::<_, Option<Vec<u8>>>(0)
-        })
-        .ok()
-        .flatten()
+        std::fs::read(self.avatar_dir.join(format!("{account_id}.jpg"))).ok()
     }
 
-    /// 是否有头像（不读 BLOB 本体）
+    /// 是否有头像（读标记列，不碰文件）
     pub fn has_avatar(&self, account_id: i64) -> bool {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT avatar IS NOT NULL FROM accounts WHERE id = ?1",
+            "SELECT has_avatar FROM accounts WHERE id = ?1",
             params![account_id],
             |row| row.get::<_, bool>(0),
         )
@@ -717,6 +726,7 @@ mod tests {
         let img = vec![1u8, 2, 3, 4, 5];
         db.update_avatar(id, &img).unwrap();
         assert!(db.has_avatar(id));
+        assert!(db.avatar_dir.join(format!("{id}.jpg")).exists(), "头像应落盘为文件");
         assert_eq!(db.get_avatar(id).unwrap(), img);
         assert!(db.find_account("alice").unwrap().has_avatar);
     }
@@ -759,11 +769,12 @@ pub struct AuthResult {
 
 pub fn validate_account(account: &str) -> Result<(), String> {
     let ok = (3..=20).contains(&account.len())
+        && !account.starts_with('_')
         && account.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if ok {
         Ok(())
     } else {
-        Err("账号格式不合法（3-20 位字母数字下划线）".into())
+        Err("账号格式不合法（3-20 位字母数字下划线，不能以 _ 开头）".into())
     }
 }
 
@@ -824,7 +835,7 @@ pub fn register(
     if invite != expected {
         return Err("邀请码错误".into());
     }
-    let account = account.trim().to_ascii_lowercase();
+    let account = account.trim().to_string();
     validate_account(&account)?;
     validate_password(password)?;
     let hash = hash_password(password).map_err(|e| format!("服务器错误：{e}"))?;
@@ -840,7 +851,7 @@ pub fn register(
 
 /// 登录：查账号 → argon2 校验 → 发新 token（失败统一文案，不泄露账号是否存在）
 pub fn login(db: &Db, account: &str, password: &str) -> Result<AuthResult, String> {
-    let account = account.trim().to_ascii_lowercase();
+    let account = account.trim();
     let Some(acc) = db.find_account(&account) else {
         return Err("账号或密码错误".into());
     };
@@ -911,18 +922,20 @@ mod tests {
     fn register_then_login_and_resume() {
         let db = mem_db();
         let r = register(&db, Some("code-1"), "Alice", "pw123456", "code-1").unwrap();
-        // 账号统一小写、昵称默认 = 账号名
-        assert_eq!(r.nickname, "alice");
+        // 账号保留原始大小写、昵称默认 = 账号名
+        assert_eq!(r.nickname, "Alice");
         assert_eq!(r.auth_token.len(), 32);
         assert!(!r.has_avatar);
 
-        let l = login(&db, "alice", "pw123456").unwrap();
+        let l = login(&db, "Alice", "pw123456").unwrap();
         assert_eq!(l.account_id, r.account_id);
         assert_ne!(l.auth_token, r.auth_token, "每次登录发新 token");
+        // 大小写敏感：小写形式是另一个账号，查不到
+        assert_eq!(login(&db, "alice", "pw123456").unwrap_err(), "账号或密码错误");
 
         let s = resume(&db, &l.auth_token).unwrap();
         assert_eq!(s.account_id, r.account_id);
-        assert_eq!(s.nickname, "alice");
+        assert_eq!(s.nickname, "Alice");
         assert_eq!(s.auth_token, l.auth_token);
     }
 
@@ -936,19 +949,26 @@ mod tests {
         );
         assert_eq!(
             register(&db, Some("code-1"), "ab", "pw123456", "code-1").unwrap_err(),
-            "账号格式不合法（3-20 位字母数字下划线）"
+            "账号格式不合法（3-20 位字母数字下划线，不能以 _ 开头）"
         );
         assert_eq!(
             register(&db, Some("code-1"), "alice中文", "pw123456", "code-1").unwrap_err(),
-            "账号格式不合法（3-20 位字母数字下划线）"
+            "账号格式不合法（3-20 位字母数字下划线，不能以 _ 开头）"
+        );
+        assert_eq!(
+            register(&db, Some("code-1"), "_alice", "pw123456", "code-1").unwrap_err(),
+            "账号格式不合法（3-20 位字母数字下划线，不能以 _ 开头）"
         );
         assert_eq!(
             register(&db, Some("code-1"), "alice", "12345", "code-1").unwrap_err(),
             "密码至少 6 位"
         );
-        // 已存在（大小写不敏感：Alice 已占用）
+        // 大小写敏感：Alice 与 alice 是两个独立账号，可各自注册
+        register(&db, Some("code-1"), "Alice", "pw123456", "code-1").unwrap();
+        register(&db, Some("code-1"), "alice", "pw123456", "code-1").unwrap();
+        // 完全一致（含大小写）才报已存在
         assert_eq!(
-            register(&db, Some("code-1"), "ALICE", "pw123456", "code-1").unwrap_err(),
+            register(&db, Some("code-1"), "Alice", "pw123456", "code-1").unwrap_err(),
             "账号已存在"
         );
     }
@@ -1679,7 +1699,7 @@ fn main() {
         None => println!("[auth] 未配置 --invite：注册已关闭"),
     }
 
-    // UDP 转发 + 清理线程（T6 实现；先占位）
+    // UDP 语音/投屏转发 + 地址映射超时清理线程（已实现，见 udp.rs）
     udp::spawn_udp_loop(port, room.clone());
     udp::spawn_cleanup_loop(room.clone());
 
@@ -1744,7 +1764,7 @@ fn sim_one(addr: &str, index: usize, seconds: u64) {
 // 替换为
 fn sim_one(addr: &str, index: usize, seconds: u64, invite: Option<String>) {
     let name = format!("sim{index}");
-    let account = name.clone(); // 账号需符合 [A-Za-z0-9_]{3,20}，sim0/sim1… 合法
+    let account = name.clone(); // 账号需符合 [A-Za-z0-9][A-Za-z0-9_]{2,19}，sim0/sim1… 合法
     let password = format!("pw-{index}-123456");
     let mut stream = TcpStream::connect(addr).expect("连接失败");
     let first = match &invite {
@@ -2541,7 +2561,7 @@ Expected: workspace 编译通过（client bin `Echo` 链接成功；`cargo check
     <div class="setup-panel">
       <h2 id="setup-title">登录 Echo</h2>
       <input id="setup-server" type="text" maxlength="64" value="127.0.0.1:9000" placeholder="服务器地址 host:port" />
-      <input id="setup-account" type="text" maxlength="20" placeholder="账号（3-20 位字母数字下划线）" autocomplete="off" />
+      <input id="setup-account" type="text" maxlength="20" placeholder="账号（3-20 位字母数字下划线，不能以 _ 开头）" autocomplete="off" />
       <input id="setup-password" type="password" maxlength="64" placeholder="密码（至少 6 位）" autocomplete="off" />
       <input id="setup-invite" type="text" maxlength="64" placeholder="邀请码" hidden />
       <div class="setup-error" id="setup-error" hidden></div>
