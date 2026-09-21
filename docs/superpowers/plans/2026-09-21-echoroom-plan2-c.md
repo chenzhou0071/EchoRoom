@@ -46,7 +46,7 @@
 
 **client / ui**（前端）
 - `ui/index.html`：登录/注册面板（改造 setup-mask）+ 完善资料弹窗（新）
-- `ui/app.js`：认证流程接线、头像缓存/懒加载/渲染、资料弹窗逻辑、点击自己名字入口
+- `ui/app.js`：认证流程接线、头像缓存/懒加载/渲染、资料弹窗逻辑
 - `ui/style.css`：错误行/链接按钮/头像图/资料弹窗样式
 - `tauri.conf.json`：版本 0.2.0
 
@@ -2526,7 +2526,7 @@ Expected: workspace 编译通过（client bin `Echo` 链接成功；`cargo check
 **Files:**
 - Modify: `client/ui/index.html`（setup-mask 结构替换 + 新增 profile-mask）
 - Modify: `client/ui/app.js`（认证面板、资料弹窗、事件监听、init 尾部）
-- Modify: `client/ui/style.css`（错误行 / 链接按钮 / 可点名字）
+- Modify: `client/ui/style.css`（错误行 / 链接按钮）
 
 **Interfaces:**
 - Consumes: Task 3 的命令 `auth_login(serverAddr, account, password)` / `auth_register(serverAddr, account, password, invite)` / `auto_connect()` / `set_profile(nickname, avatar)`；事件 `auth_ok` / `auth_fail` / `profile_changed` / `profile_error`；`members` 五元组 / `member_join` 三元组；config 的 `server_addr` / `account` / `auth_token`
@@ -2754,21 +2754,7 @@ init 尾部（`if (!cfg.nickname) { ... } else { await invoke("connect"); }` 整
   }
 ```
 
-- [ ] **Step 4: app.js——点击自己名字 = 修改资料入口**
-
-`buildCard` 中名字节点创建处（`name.textContent = m.nickname;` 之后）加：
-```js
-  if (isSelf) {
-    name.classList.add("editable");
-    name.title = "点击修改资料";
-    name.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openProfilePop(m.nickname);
-    });
-  }
-```
-
-- [ ] **Step 5: style.css——错误行、链接按钮与可点名字**
+- [ ] **Step 4: style.css——错误行与链接按钮**
 
 `client/ui/style.css` 在 `.setup-panel button { ... }` 规则之后追加：
 ```css
@@ -2787,11 +2773,9 @@ init 尾部（`if (!cfg.nickname) { ... } else { await invoke("connect"); }` 整
   cursor: pointer;
 }
 .setup-panel .setup-link:hover { text-decoration: underline; }
-.member-name.editable { cursor: pointer; }
-.member-name.editable:hover { color: var(--accent); }
 ```
 
-- [ ] **Step 6: 语法校验**
+- [ ] **Step 5: 语法校验**
 
 Run: `node --check client/ui/app.js`
 Expected: 无输出（语法通过）。
@@ -3067,7 +3051,7 @@ el("profile-avatar-file").addEventListener("change", async (e) => {
 
 - [ ] **Step 5: style.css——头像行与头像图**
 
-`client/ui/style.css` 的 `.member-name.editable:hover { color: var(--accent); }` 之后追加：
+`client/ui/style.css` 的 `.setup-panel .setup-link:hover { text-decoration: underline; }` 之后追加：
 ```css
 .profile-avatar-row {
   display: flex;
@@ -3138,7 +3122,7 @@ Expected: workspace 编译通过。
 Run: `node --check client/ui/app.js`
 Expected: 无输出（语法通过）。
 
-- [ ] **Step 3: 服务器 + 双客户端手工验收（8 条）**
+- [ ] **Step 3: 服务器 + 双客户端手工验收（7 条）**
 
 先启动服务器（终端 A）：
 ```powershell
@@ -3152,10 +3136,9 @@ Expected: 打印 `[auth] 数据库: data\echoroom.db`、`[auth] 邀请码已配�
 | 2 | 自动登录 | 关闭并重启客户端 A | 不再显示登录面板，直接进房（Resume；服务器日志可见新连接） |
 | 3 | 错误路径 | 依次试：错邀请码 / 已存在账号 / 5 位密码 / 登录错误密码 | 面板分别显示对应文案且不关闭；按钮恢复可点 |
 | 4 | 双账号 | 客户端 B 注册另一账号并进房 | 双方卡片互见（含头像懒加载）；两人语音正常 |
-| 5 | 改资料入口 | 客户端 A 点击自己名字 → 改昵称（不换头像）保存 | 双端卡片/公屏昵称实时更新；自己头像保持不变 |
-| 6 | 服务器重启 | Ctrl+C 停掉终端 A 服务器后原命令重启 | 客户端 A/B 自动重连（Resume）无感，聊天/语音恢复 |
-| 7 | 旧版客户端 | 用 0.1.x 旧 exe 连接新服务器 | 旧客户端被断开或认证失败（无法进房），服务器日志正常、其他成员不受影响 |
-| 8 | B 功能回归 | 聊天链接标蓝可点 / 音量 0–400% / 静音广播 / 投屏与观看 / 进出音效 | 全部正常（B 交付功能不回归） |
+| 5 | 服务器重启 | Ctrl+C 停掉终端 A 服务器后原命令重启 | 客户端 A/B 自动重连（Resume）无感，聊天/语音恢复 |
+| 6 | 旧版客户端 | 用 0.1.x 旧 exe 连接新服务器 | 旧客户端被断开或认证失败（无法进房），服务器日志正常、其他成员不受影响 |
+| 7 | B 功能回归 | 聊天链接标蓝可点 / 音量 0–400% / 静音广播 / 投屏与观看 / 进出音效 | 全部正常（B 交付功能不回归） |
 
 - [ ] **Step 4: sim_clients 冒烟（可选但推荐）**
 
@@ -3170,12 +3153,12 @@ Expected: 3 个模拟客户端注册成功（可再跑一次验证"账号已存�
 ```powershell
 cd E:\pro\EchoRoom\client\src-tauri; cargo tauri build
 ```
-Expected: 构建成功，产物：
-- `client/src-tauri/target/release/Echo.exe`
-- `client/src-tauri/target/release/bundle/nsis/Echo_0.2.0_x64-setup.exe`
+Expected: 构建成功，产物（cargo 使用 workspace 共享 target 目录，在仓库根）：
+- `E:\pro\EchoRoom\target\release\Echo.exe`
+- `E:\pro\EchoRoom\target\release\bundle\nsis\Echo_0.2.0_x64-setup.exe`
 
 ```powershell
-Copy-Item 'E:\pro\EchoRoom\client\src-tauri\target\release\Echo.exe' "$env:USERPROFILE\Desktop" -Force; Copy-Item 'E:\pro\EchoRoom\client\src-tauri\target\release\bundle\nsis\Echo_0.2.0_x64-setup.exe' "$env:USERPROFILE\Desktop" -Force
+Copy-Item 'E:\pro\EchoRoom\target\release\Echo.exe' "$env:USERPROFILE\Desktop" -Force; Copy-Item 'E:\pro\EchoRoom\target\release\bundle\nsis\Echo_0.2.0_x64-setup.exe' "$env:USERPROFILE\Desktop" -Force
 ```
 Expected: 桌面出现 `Echo.exe` 与 `Echo_0.2.0_x64-setup.exe`。
 
