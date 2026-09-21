@@ -2,6 +2,9 @@
 /target
 **/target/
 
+# 服务器运行数据（SQLite 库与头像文件）
+data/
+
 # 客户端构建产物
 client/dist/
 client/src-tauri/target/

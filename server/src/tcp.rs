@@ -6,15 +6,24 @@ use std::sync::{Arc, Mutex};
 use echoroom_protocol::messages::TcpMessage;
 use echoroom_protocol::tcp;
 
+use crate::auth;
+use crate::db::Db;
 use crate::room::Room;
 
-pub fn serve(listener: TcpListener, room: Arc<Mutex<Room>>) -> std::io::Result<()> {
+pub fn serve(
+    listener: TcpListener,
+    room: Arc<Mutex<Room>>,
+    db: Arc<Db>,
+    invite: Option<String>,
+) -> std::io::Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
                 let room = room.clone();
+                let db = db.clone();
+                let invite = invite.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = handle_conn(s, room) {
+                    if let Err(e) = handle_conn(s, room, db, invite) {
                         eprintln!("[tcp] 连接结束: {e}");
                     }
                 });
@@ -25,30 +34,63 @@ pub fn serve(listener: TcpListener, room: Arc<Mutex<Room>>) -> std::io::Result<(
     Ok(())
 }
 
-fn handle_conn(mut stream: TcpStream, room: Arc<Mutex<Room>>) -> std::io::Result<()> {
+fn handle_conn(
+    mut stream: TcpStream,
+    room: Arc<Mutex<Room>>,
+    db: Arc<Db>,
+    invite: Option<String>,
+) -> std::io::Result<()> {
     let peer = stream.peer_addr()?;
-    // ---- 登录（第一条消息必须是 Login）----
-    let (nickname, buf_rest) = read_first_login(&mut stream)?;
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    let join = room.lock().unwrap().join(nickname.clone(), tx);
-    let ok = match join {
-        Ok(ok) => ok,
-        Err(_) => {
-            let reject = tcp::encode(&TcpMessage::LoginReject { reason: "房间已满（6人）".into() });
+    // ---- 认证（第一条消息必须是 Register / Login / Resume 之一）----
+    let (first, buf_rest) = read_first_auth(&mut stream, &db, invite.as_deref())?;
+    let auth_result = match first {
+        FirstAuth::Ok(r) => r,
+        FirstAuth::Reject(reason) => {
+            let reject = tcp::encode(&TcpMessage::AuthReject { reason });
             stream.write_all(&reject)?;
             return Ok(());
         }
     };
-    println!("[tcp] {nickname}(uid={}) 加入 {peer}", ok.uid);
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let join = room.lock().unwrap().join(
+        auth_result.nickname.clone(),
+        auth_result.account_id,
+        auth_result.has_avatar,
+        tx,
+    );
+    let ok = match join {
+        Ok(ok) => ok,
+        Err(_) => {
+            let reject = tcp::encode(&TcpMessage::AuthReject { reason: "房间已满（6人）".into() });
+            stream.write_all(&reject)?;
+            return Ok(());
+        }
+    };
+    println!("[tcp] {}(uid={}) 加入 {peer}", auth_result.nickname, ok.uid);
     // 离开守卫：此后无论何种路径结束（正常断开 / RST / 提前 return / panic），
     // 都保证移除成员并广播 MemberLeave，不产生"僵尸连接"。
-    let guard = LeaveGuard { room: room.clone(), uid: ok.uid, nickname: nickname.clone() };
+    let guard = LeaveGuard { room: room.clone(), uid: ok.uid, nickname: auth_result.nickname.clone() };
     // LoginOk（定向）+ MemberJoin（广播给其他人）
     {
-        let login_ok = TcpMessage::LoginOk { uid: ok.uid, token: ok.token, members: ok.members.clone() };
+        // members 含自己：客户端需要自己初始的静音/流位图/头像标记
+        let mut members = ok.members.clone();
+        members.push((ok.uid, auth_result.nickname.clone(), false, 0, auth_result.has_avatar));
+        let login_ok = TcpMessage::LoginOk {
+            uid: ok.uid,
+            udp_token: ok.token,
+            auth_token: auth_result.auth_token.clone(),
+            members,
+        };
         stream.write_all(&tcp::encode(&login_ok))?;
         let room = room.lock().unwrap();
-        room.broadcast(Some(ok.uid), &TcpMessage::MemberJoin { uid: ok.uid, nickname: nickname.clone() });
+        room.broadcast(
+            Some(ok.uid),
+            &TcpMessage::MemberJoin {
+                uid: ok.uid,
+                nickname: auth_result.nickname.clone(),
+                has_avatar: auth_result.has_avatar,
+            },
+        );
     }
     // ---- 写线程：从 rx 取预编码字节写出 ----
     let mut write_stream = stream.try_clone()?;
@@ -117,6 +159,32 @@ fn handle_conn(mut stream: TcpStream, room: Arc<Mutex<Room>>) -> std::io::Result
                             // 转发给目标（uid 替换为请求者，供流主识别）
                             room.send_to(target, &TcpMessage::RequestKeyframe { uid: ok.uid, target });
                         }
+                        TcpMessage::SetProfile { nickname, avatar } => {
+                            match auth::apply_profile(&db, auth_result.account_id, &nickname, avatar.as_deref()) {
+                                Ok(()) => {
+                                    let mut room = room.lock().unwrap();
+                                    room.update_nickname(ok.uid, &nickname);
+                                    if avatar.is_some() {
+                                        room.set_has_avatar(ok.uid, true);
+                                    }
+                                    room.broadcast(None, &TcpMessage::ProfileChanged { uid: ok.uid, nickname });
+                                }
+                                Err(reason) => {
+                                    // 已进房：AuthReject 语义为"资料更新失败"，仅定向提示不断开
+                                    let room = room.lock().unwrap();
+                                    room.send_to(ok.uid, &TcpMessage::AuthReject { reason });
+                                }
+                            }
+                        }
+                        TcpMessage::AvatarRequest { uid: target } => {
+                            // 两段取锁：先短锁房间拿 account_id，再查库（避免跨锁嵌套）
+                            let account_id = room.lock().unwrap().account_id_of(target);
+                            if let Some(account_id) = account_id {
+                                let data = db.get_avatar(account_id).unwrap_or_default();
+                                let room = room.lock().unwrap();
+                                room.send_to(ok.uid, &TcpMessage::AvatarData { uid: target, data });
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -140,23 +208,48 @@ fn handle_conn(mut stream: TcpStream, room: Arc<Mutex<Room>>) -> std::io::Result
     Ok(())
 }
 
-/// 读缓冲直到解出第一条 Login 消息；返回 (昵称, 剩余未消费字节)
-fn read_first_login(stream: &mut TcpStream) -> std::io::Result<(String, Vec<u8>)> {
+/// 首条消息认证结果
+enum FirstAuth {
+    Ok(auth::AuthResult),
+    Reject(String),
+}
+
+/// 读缓冲直到解出第一条 Register/Login/Resume 并完成认证校验；
+/// 返回 (认证结果, 剩余未消费字节)
+fn read_first_auth(
+    stream: &mut TcpStream,
+    db: &Db,
+    invite: Option<&str>,
+) -> std::io::Result<(FirstAuth, Vec<u8>)> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
         match tcp::try_decode(&buf) {
-            Ok(Some((TcpMessage::Login { nickname }, n))) => {
+            Ok(Some((msg, n))) => {
                 buf.drain(..n);
-                return Ok((nickname, buf));
-            }
-            Ok(Some(_)) => {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "首条消息必须是 Login"));
+                let result = match msg {
+                    TcpMessage::Register { account, password, invite: user_invite } => {
+                        auth::register(db, invite, &account, &password, &user_invite)
+                    }
+                    TcpMessage::Login { account, password } => auth::login(db, &account, &password),
+                    TcpMessage::Resume { auth_token } => auth::resume(db, &auth_token),
+                    _ => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "首条消息必须是 Register/Login/Resume",
+                        ));
+                    }
+                };
+                let first = match result {
+                    Ok(r) => FirstAuth::Ok(r),
+                    Err(reason) => FirstAuth::Reject(reason),
+                };
+                return Ok((first, buf));
             }
             Ok(None) => {
                 let n = stream.read(&mut chunk)?;
                 if n == 0 {
-                    return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "连接在登录前关闭"));
+                    return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "连接在认证前关闭"));
                 }
                 buf.extend_from_slice(&chunk[..n]);
             }

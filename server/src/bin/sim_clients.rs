@@ -1,4 +1,7 @@
-//! 模拟客户端：登录 + 定时公屏 + UDP 语音模拟 + 收包统计。
+//! 模拟客户端：注册/登录 + 定时公屏 + UDP 语音模拟 + 收包统计。
+//! 用法：sim_clients [addr] [n] [seconds] [invite]
+//! 带 invite：先尝试注册（同名已存在则自动回退登录）；不带：直接登录
+//! （要求账号已注册过，否则认证被拒后退出）。
 use echoroom_protocol::messages::{TcpMessage, UdpPacket};
 use echoroom_protocol::{tcp, udp, HEARTBEAT_INTERVAL_MS};
 use std::collections::HashMap;
@@ -11,25 +14,38 @@ fn main() {
     let addr = args.get(1).cloned().unwrap_or_else(|| "127.0.0.1:9000".into());
     let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2);
     let seconds: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(10);
+    let invite = args.get(4).cloned();
 
     let mut handles = Vec::new();
     for i in 0..n {
         let addr = addr.clone();
-        handles.push(std::thread::spawn(move || sim_one(&addr, i, seconds)));
+        let invite = invite.clone();
+        handles.push(std::thread::spawn(move || sim_one(&addr, i, seconds, invite)));
     }
     for h in handles {
         let _ = h.join();
     }
 }
 
-fn sim_one(addr: &str, index: usize, seconds: u64) {
+fn sim_one(addr: &str, index: usize, seconds: u64, invite: Option<String>) {
     let name = format!("sim{index}");
+    let account = name.clone(); // 账号需符合 [A-Za-z0-9][A-Za-z0-9_]{2,19}，sim0/sim1… 合法
+    let password = format!("pw-{index}-123456");
     let mut stream = TcpStream::connect(addr).expect("连接失败");
-    stream.write_all(&tcp::encode(&TcpMessage::Login { nickname: name.clone() })).unwrap();
+    let first = match &invite {
+        Some(code) => TcpMessage::Register {
+            account: account.clone(),
+            password: password.clone(),
+            invite: code.clone(),
+        },
+        None => TcpMessage::Login { account: account.clone(), password: password.clone() },
+    };
+    stream.write_all(&tcp::encode(&first)).unwrap();
     stream.set_read_timeout(Some(Duration::from_millis(20))).unwrap(); // 循环节拍：20ms
 
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
+    let mut fallback_done = false; // 注册撞名后是否已回退登录（防死循环）
 
     // UDP 状态（LoginOk 后建立）
     let mut udp_sock: Option<UdpSocket> = None;
@@ -44,7 +60,7 @@ fn sim_one(addr: &str, index: usize, seconds: u64) {
     let mut last_voice = Instant::now();
     let mut last_heartbeat = Instant::now();
 
-    loop {
+    'main: loop {
         if start.elapsed().as_secs() >= seconds {
             break;
         }
@@ -90,17 +106,28 @@ fn sim_one(addr: &str, index: usize, seconds: u64) {
             while let Ok(Some((msg, used))) = tcp::try_decode(&buf) {
                 buf.drain(..used);
                 match msg {
-                    TcpMessage::LoginOk { uid, token, .. } => {
+                    TcpMessage::LoginOk { uid, udp_token, .. } => {
                         my_uid = uid;
                         println!("[{name}] LoginOk uid={uid}");
                         let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
                         sock.connect(addr).unwrap();
                         sock.set_nonblocking(true).unwrap();
-                        sock.send(&udp::encode(uid, 0, &UdpPacket::Register { token })).unwrap();
+                        sock.send(&udp::encode(uid, 0, &UdpPacket::Register { token: udp_token })).unwrap();
                         udp_sock = Some(sock);
                     }
+                    TcpMessage::AuthReject { reason } => {
+                        if invite.is_some() && reason == "账号已存在" && !fallback_done {
+                            fallback_done = true;
+                            println!("[{name}] 账号已存在，回退登录");
+                            let login = TcpMessage::Login { account: account.clone(), password: password.clone() };
+                            stream.write_all(&tcp::encode(&login)).unwrap();
+                        } else {
+                            eprintln!("[{name}] 认证失败：{reason}");
+                            break 'main;
+                        }
+                    }
                     TcpMessage::Chat { uid, text } => println!("[{name}] 收到 uid={uid}: {text}"),
-                    TcpMessage::MemberJoin { uid, nickname } => println!("[{name}] +{nickname}(uid={uid})"),
+                    TcpMessage::MemberJoin { uid, nickname, .. } => println!("[{name}] +{nickname}(uid={uid})"),
                     TcpMessage::MemberLeave { uid } => println!("[{name}] -uid={uid}"),
                     other => println!("[{name}] {other:?}"),
                 }

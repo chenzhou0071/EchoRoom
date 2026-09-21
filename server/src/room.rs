@@ -4,15 +4,15 @@ use std::net::SocketAddr;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-use echoroom_protocol::messages::TcpMessage;
+use echoroom_protocol::messages::{MemberInfo, TcpMessage};
 use echoroom_protocol::{tcp, ROOM_CAPACITY};
 
 #[derive(Debug, PartialEq)]
 pub struct JoinOk {
     pub uid: u16,
     pub token: u32,
-    /// 加入前已在房间的成员：(uid, 昵称, 是否静音, 流位图)
-    pub members: Vec<(u16, String, bool, u8)>,
+    /// 加入前已在房间的成员（五元组：含 has_avatar）
+    pub members: Vec<MemberInfo>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -22,8 +22,12 @@ pub enum JoinErr {
 
 pub struct Member {
     pub uid: u16,
+    /// 持久账号 id（AvatarRequest 查库用）
+    pub account_id: i64,
     pub nickname: String,
     pub token: u32,
+    /// 是否已上传头像（客户端懒加载标记）
+    pub has_avatar: bool,
     pub muted: bool,
     /// 流位图：bit0 = 投屏（屏幕）、bit1 = 摄像头
     pub streams: u8,
@@ -35,48 +39,42 @@ pub struct Member {
 pub struct Room {
     members: HashMap<u16, Member>,
     next_uid: u16,
-    /// 简单确定性伪随机（学习用途：LCG；不引入 rand 依赖）
-    rng_state: u64,
     /// 订阅表：订阅者 uid → 目标 uid（一人最多订阅一人，覆盖式）
     subscriptions: HashMap<u16, u16>,
 }
 
 impl Room {
     pub fn new() -> Room {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x9E3779B97F4A7C15);
-        Room { members: HashMap::new(), next_uid: 1, rng_state: seed | 1, subscriptions: HashMap::new() }
+        Room { members: HashMap::new(), next_uid: 1, subscriptions: HashMap::new() }
     }
 
-    fn next_token(&mut self) -> u32 {
-        // LCG（Numerical Recipes 常数）
-        self.rng_state = self
-            .rng_state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        (self.rng_state >> 32) as u32
-    }
-
-    pub fn join(&mut self, nickname: String, tx: Sender<Vec<u8>>) -> Result<JoinOk, JoinErr> {
+    pub fn join(
+        &mut self,
+        nickname: String,
+        account_id: i64,
+        has_avatar: bool,
+        tx: Sender<Vec<u8>>,
+    ) -> Result<JoinOk, JoinErr> {
         if self.members.len() >= ROOM_CAPACITY {
             return Err(JoinErr::Full);
         }
-        let members: Vec<(u16, String, bool, u8)> = self
+        let members: Vec<MemberInfo> = self
             .members
             .values()
-            .map(|m| (m.uid, m.nickname.clone(), m.muted, m.streams))
+            .map(|m| (m.uid, m.nickname.clone(), m.muted, m.streams, m.has_avatar))
             .collect();
         let uid = self.next_uid;
         self.next_uid = self.next_uid.wrapping_add(1).max(1);
-        let token = self.next_token();
+        // UDP 会话 token：真随机（每连接一次性凭证）
+        let token = rand::RngCore::next_u32(&mut rand::rngs::OsRng);
         self.members.insert(
             uid,
             Member {
                 uid,
+                account_id,
                 nickname,
                 token,
+                has_avatar,
                 muted: false,
                 streams: 0,
                 tx,
@@ -122,6 +120,31 @@ impl Room {
         } else {
             false
         }
+    }
+
+    /// 更新成员昵称（SetProfile 成功后同步在线状态）；成员不存在 → false
+    pub fn update_nickname(&mut self, uid: u16, nickname: &str) -> bool {
+        if let Some(m) = self.members.get_mut(&uid) {
+            m.nickname = nickname.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 更新头像标记；成员不存在 → false
+    pub fn set_has_avatar(&mut self, uid: u16, has: bool) -> bool {
+        if let Some(m) = self.members.get_mut(&uid) {
+            m.has_avatar = has;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 成员对应的账号 id（AvatarRequest 查库用）
+    pub fn account_id_of(&self, uid: u16) -> Option<i64> {
+        self.members.get(&uid).map(|m| m.account_id)
     }
 
     pub fn set_udp(&mut self, uid: u16, addr: SocketAddr) {
@@ -233,23 +256,23 @@ mod tests {
         let mut rxs = Vec::new();
         for i in 0..ROOM_CAPACITY {
             let (tx, rx) = mpsc::channel();
-            let ok = room.join(format!("user{i}"), tx);
+            let ok = room.join(format!("user{i}"), i as i64 + 1, false, tx);
             assert!(ok.is_ok());
             rxs.push(rx);
         }
         let (tx, _rx) = mpsc::channel();
-        assert_eq!(room.join("第7人".into(), tx), Err(JoinErr::Full));
+        assert_eq!(room.join("第7人".into(), 7, false, tx), Err(JoinErr::Full));
     }
 
     #[test]
     fn join_returns_existing_members_and_leaves_removes() {
         let mut room = Room::new();
         let (tx1, _r1) = mpsc::channel();
-        let ok1 = room.join("A".into(), tx1).unwrap();
+        let ok1 = room.join("A".into(), 1, false, tx1).unwrap();
         assert!(ok1.members.is_empty());
         let (tx2, _r2) = mpsc::channel();
-        let ok2 = room.join("B".into(), tx2).unwrap();
-        assert_eq!(ok2.members, vec![(ok1.uid, "A".to_string(), false, 0)]);
+        let ok2 = room.join("B".into(), 2, true, tx2).unwrap();
+        assert_eq!(ok2.members, vec![(ok1.uid, "A".to_string(), false, 0, false)]);
         assert!(room.leave(ok1.uid));
         assert!(!room.leave(ok1.uid)); // 再删为 false
     }
@@ -259,13 +282,13 @@ mod tests {
         let mut room = Room::new();
         let (tx1, rx1) = mpsc::channel();
         let (tx2, rx2) = mpsc::channel();
-        let a = room.join("A".into(), tx1).unwrap();
-        let b = room.join("B".into(), tx2).unwrap();
-        room.broadcast(Some(a.uid), &TcpMessage::MemberJoin { uid: b.uid, nickname: "B".into() });
+        let a = room.join("A".into(), 1, false, tx1).unwrap();
+        let b = room.join("B".into(), 2, false, tx2).unwrap();
+        room.broadcast(Some(a.uid), &TcpMessage::MemberJoin { uid: b.uid, nickname: "B".into(), has_avatar: false });
         assert!(rx1.try_recv().is_err(), "A 不应收到（被排除）");
         let bytes = rx2.try_recv().expect("B 应收到");
         let (msg, _) = echoroom_protocol::tcp::try_decode(&bytes).unwrap().unwrap();
-        assert_eq!(msg, TcpMessage::MemberJoin { uid: b.uid, nickname: "B".into() });
+        assert_eq!(msg, TcpMessage::MemberJoin { uid: b.uid, nickname: "B".into(), has_avatar: false });
     }
 
     #[test]
@@ -273,7 +296,7 @@ mod tests {
         use std::time::Duration;
         let mut room = Room::new();
         let (tx, _rx) = mpsc::channel();
-        let a = room.join("A".into(), tx).unwrap();
+        let a = room.join("A".into(), 1, false, tx).unwrap();
         let addr: std::net::SocketAddr = "127.0.0.1:5555".parse().unwrap();
         assert!(!room.validate_token(a.uid, 999));
         assert!(room.validate_token(a.uid, a.token));
@@ -291,12 +314,12 @@ mod tests {
         let mut room = Room::new();
         let (tx1, rx1) = mpsc::channel();
         let (tx2, rx2) = mpsc::channel();
-        let a = room.join("A".into(), tx1).unwrap();
-        let _b = room.join("B".into(), tx2).unwrap();
-        room.send_to(a.uid, &TcpMessage::LoginReject { reason: "测试".into() });
+        let a = room.join("A".into(), 1, false, tx1).unwrap();
+        let _b = room.join("B".into(), 2, false, tx2).unwrap();
+        room.send_to(a.uid, &TcpMessage::AuthReject { reason: "测试".into() });
         let bytes = rx1.try_recv().expect("A 应收到定向消息");
         let (msg, _) = echoroom_protocol::tcp::try_decode(&bytes).unwrap().unwrap();
-        assert_eq!(msg, TcpMessage::LoginReject { reason: "测试".into() });
+        assert_eq!(msg, TcpMessage::AuthReject { reason: "测试".into() });
         assert!(rx2.try_recv().is_err(), "B 不应收到定向消息");
     }
 
@@ -304,27 +327,27 @@ mod tests {
     fn set_muted_updates_member_and_join_reports_it() {
         let mut room = Room::new();
         let (tx1, _r1) = mpsc::channel();
-        let a = room.join("A".into(), tx1).unwrap();
+        let a = room.join("A".into(), 1, false, tx1).unwrap();
         assert!(room.set_muted(a.uid, true));
         assert!(!room.set_muted(999, true)); // 不存在的成员
         let (tx2, _r2) = mpsc::channel();
-        let b = room.join("B".into(), tx2).unwrap();
+        let b = room.join("B".into(), 2, false, tx2).unwrap();
         // 后加入者应看到 A 处于静音
-        assert_eq!(b.members, vec![(a.uid, "A".to_string(), true, 0)]);
+        assert_eq!(b.members, vec![(a.uid, "A".to_string(), true, 0, false)]);
     }
 
     #[test]
     fn stream_bitmap_set_and_join_reports_it() {
         let mut room = Room::new();
         let (tx1, _r1) = mpsc::channel();
-        let a = room.join("A".into(), tx1).unwrap();
+        let a = room.join("A".into(), 1, false, tx1).unwrap();
         assert_eq!(room.set_stream(a.uid, STREAM_SCREEN, true), Some(1));
         assert_eq!(room.set_stream(a.uid, STREAM_CAMERA, true), Some(3));
         assert_eq!(room.set_stream(a.uid, STREAM_SCREEN, false), Some(2));
         assert_eq!(room.set_stream(999, STREAM_SCREEN, true), None, "成员不存在");
         let (tx2, _r2) = mpsc::channel();
-        let b = room.join("B".into(), tx2).unwrap();
-        assert_eq!(b.members, vec![(a.uid, "A".to_string(), false, 2)]);
+        let b = room.join("B".into(), 2, false, tx2).unwrap();
+        assert_eq!(b.members, vec![(a.uid, "A".to_string(), false, 2, false)]);
     }
 
     #[test]
@@ -332,8 +355,8 @@ mod tests {
         let mut room = Room::new();
         let (txa, _ra) = mpsc::channel();
         let (txb, _rb) = mpsc::channel();
-        let a = room.join("A".into(), txa).unwrap();
-        let b = room.join("B".into(), txb).unwrap();
+        let a = room.join("A".into(), 1, false, txa).unwrap();
+        let b = room.join("B".into(), 2, false, txb).unwrap();
         let addr_b: std::net::SocketAddr = "127.0.0.1:6001".parse().unwrap();
         room.set_udp(b.uid, addr_b);
         assert!(!room.subscribe(b.uid, b.uid), "不能订阅自己");
@@ -344,7 +367,7 @@ mod tests {
         assert_eq!(room.subscribers_with_udp(a.uid), vec![addr_b]);
         // 覆盖式：C 订阅 A 后再改订阅 B
         let (txc, _rc) = mpsc::channel();
-        let c = room.join("C".into(), txc).unwrap();
+        let c = room.join("C".into(), 3, false, txc).unwrap();
         assert!(room.subscribe(c.uid, a.uid));
         assert_eq!(room.viewers_of(a.uid), vec![b.uid, c.uid], "两人在看，按 uid 升序");
         assert!(room.subscribe(c.uid, b.uid));
@@ -360,13 +383,30 @@ mod tests {
         let mut room = Room::new();
         let (txa, _ra) = mpsc::channel();
         let (txb, _rb) = mpsc::channel();
-        let a = room.join("A".into(), txa).unwrap();
-        let b = room.join("B".into(), txb).unwrap();
+        let a = room.join("A".into(), 1, false, txa).unwrap();
+        let b = room.join("B".into(), 2, false, txb).unwrap();
         room.subscribe(b.uid, a.uid); // B 看 A
         room.subscribe(a.uid, b.uid); // A 看 B（互看）
         room.leave(b.uid);
         assert!(room.viewers_of(a.uid).is_empty(), "B 离开后 A 的观众列表清空");
         assert_eq!(room.subscription_of(a.uid), None, "A 看 B 的订阅记录被清");
         assert!(!room.unsubscribe(a.uid));
+    }
+
+    #[test]
+    fn update_nickname_avatar_flag_and_account_id() {
+        let mut room = Room::new();
+        let (tx1, _r1) = mpsc::channel();
+        let a = room.join("old".into(), 42, true, tx1).unwrap();
+        assert_eq!(room.account_id_of(a.uid), Some(42));
+        assert_eq!(room.account_id_of(999), None);
+        assert!(room.update_nickname(a.uid, "新名字"));
+        assert!(!room.update_nickname(999, "x")); // 不存在的成员
+        assert!(room.set_has_avatar(a.uid, false));
+        assert!(!room.set_has_avatar(999, true));
+        // 后加入者看到的五元组应为更新后的昵称与头像标记
+        let (tx2, _r2) = mpsc::channel();
+        let b = room.join("B".into(), 2, false, tx2).unwrap();
+        assert_eq!(b.members, vec![(a.uid, "新名字".to_string(), false, 0, false)]);
     }
 }
