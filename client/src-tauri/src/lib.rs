@@ -27,9 +27,12 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bridge::get_config,
-            bridge::set_config,
-            bridge::connect,
+            bridge::auth_login,
+            bridge::auth_register,
+            bridge::auto_connect,
             bridge::send_chat,
+            bridge::set_profile,
+            bridge::avatar_request,
             bridge::set_self_gain,
             bridge::set_muted,
             bridge::set_peer_gain,

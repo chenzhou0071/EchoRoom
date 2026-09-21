@@ -1,4 +1,4 @@
-//! 客户端配置：昵称、服务器地址与音量设置，持久化到 %APPDATA%\com.echoroom.dev\config.json。
+//! 客户端配置：服务器地址、账号与自动登录凭证、音量设置，持久化到 %APPDATA%\com.echoroom.dev\config.json。
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -18,8 +18,13 @@ fn default_share_quality() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
-    pub nickname: String,
     pub server_addr: String,
+    /// 登录账号（认证命令发起时保存；表单预填与自动登录显示用）
+    #[serde(default)]
+    pub account: String,
+    /// 自动登录凭证（服务器签发；Resume 失效时被清除）
+    #[serde(default)]
+    pub auth_token: String,
     /// 自己的采集增益（0.0–4.0）
     #[serde(default = "default_gain")]
     pub self_gain: f32,
@@ -43,8 +48,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            nickname: String::new(),
             server_addr: "127.0.0.1:9000".into(),
+            account: String::new(),
+            auth_token: String::new(),
             self_gain: 1.0,
             muted: false,
             peer_gains: std::collections::HashMap::new(),
@@ -84,6 +90,8 @@ mod tests {
     fn roundtrip_with_volume_fields() {
         let path = std::env::temp_dir().join("echoroom_cfg_test_roundtrip.json");
         let mut cfg = Config::default();
+        cfg.account = "alice".into();
+        cfg.auth_token = "0123456789abcdef0123456789abcdef".into();
         cfg.self_gain = 1.5;
         cfg.muted = true;
         cfg.peer_gains.insert("小林".into(), 0.5);
@@ -99,9 +107,12 @@ mod tests {
     #[test]
     fn old_config_without_volume_fields_loads_defaults() {
         let path = std::env::temp_dir().join("echoroom_cfg_test_old.json");
+        // 旧版配置含 nickname 字段：serde 忽略未知字段，账号相关字段取默认空值
         std::fs::write(&path, r#"{"nickname":"老用户","server_addr":"127.0.0.1:9000"}"#).unwrap();
         let loaded = Config::load(&path);
-        assert_eq!(loaded.nickname, "老用户");
+        assert_eq!(loaded.server_addr, "127.0.0.1:9000");
+        assert!(loaded.account.is_empty());
+        assert!(loaded.auth_token.is_empty());
         assert_eq!(loaded.self_gain, 1.0);
         assert!(!loaded.muted);
         assert!(loaded.peer_gains.is_empty());

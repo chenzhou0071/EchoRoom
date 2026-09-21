@@ -21,11 +21,11 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub fn emit_member_list(&self, members: Vec<(u16, String, bool, u8)>) {
+    pub fn emit_member_list(&self, members: Vec<echoroom_protocol::messages::MemberInfo>) {
         let _ = self.app.emit("members", members);
     }
-    pub fn emit_member_join(&self, uid: u16, nickname: String) {
-        let _ = self.app.emit("member_join", (uid, nickname));
+    pub fn emit_member_join(&self, uid: u16, nickname: String, has_avatar: bool) {
+        let _ = self.app.emit("member_join", (uid, nickname, has_avatar));
     }
     pub fn emit_member_leave(&self, uid: u16) {
         let _ = self.app.emit("member_leave", uid);
@@ -61,6 +61,50 @@ impl Bridge {
     pub fn emit_request_keyframe(&self) {
         let _ = self.app.emit("request_keyframe", ());
     }
+    /// 认证成功（注册/登录/自动登录）
+    pub fn emit_auth_ok(&self) {
+        let _ = self.app.emit("auth_ok", ());
+    }
+    /// 认证失败（登录/注册/自动登录被拒）：客户端已停止重连，交还 UI
+    pub fn emit_auth_fail(&self, reason: String) {
+        let _ = self.app.emit("auth_fail", reason);
+    }
+    /// 资料更新失败提示（如昵称不合法；连接保持）
+    pub fn emit_profile_error(&self, reason: String) {
+        let _ = self.app.emit("profile_error", reason);
+    }
+    /// 昵称变更广播（头像变化由前端重拉 AvatarData 感知）
+    pub fn emit_profile_changed(&self, uid: u16, nickname: String) {
+        let _ = self.app.emit("profile_changed", serde_json::json!({ "uid": uid, "nickname": nickname }));
+    }
+    /// 头像数据（空数组 = 无头像）；前端 Blob 缓存渲染
+    pub fn emit_avatar_data(&self, uid: u16, data: Vec<u8>) {
+        let _ = self.app.emit("avatar_data", serde_json::json!({ "uid": uid, "data": data }));
+    }
+    /// 持久化 auth_token（LoginOk 后调用；独立线程写盘防阻塞网络线程）
+    pub fn save_auth_token(&self, token: String) {
+        let state = self.app.state::<AppState>();
+        let cfg = {
+            let mut cfg = state.config.lock().unwrap();
+            cfg.auth_token = token;
+            cfg.clone()
+        };
+        std::thread::spawn(move || {
+            let _ = cfg.save(&default_config_path());
+        });
+    }
+    /// 清除 auth_token（Resume 失效：凭证过期）
+    pub fn clear_auth_token(&self) {
+        let state = self.app.state::<AppState>();
+        let cfg = {
+            let mut cfg = state.config.lock().unwrap();
+            cfg.auth_token.clear();
+            cfg.clone()
+        };
+        std::thread::spawn(move || {
+            let _ = cfg.save(&default_config_path());
+        });
+    }
 }
 
 /// 应用状态：配置 + 当前网络会话 + 音频管线
@@ -88,30 +132,66 @@ pub fn get_config(state: State<AppState>) -> Config {
 }
 
 #[tauri::command]
-pub fn set_config(
+pub fn auth_login(
     app: AppHandle,
     state: State<AppState>,
-    nickname: String,
     server_addr: String,
+    account: String,
+    password: String,
 ) -> Result<(), String> {
-    {
-        let mut cfg = state.config.lock().unwrap();
-        cfg.nickname = nickname.clone();
-        cfg.server_addr = server_addr.clone();
-        cfg.save(&default_config_path()).map_err(|e| e.to_string())?;
-    }
-    // 保存后立即用新配置重连
-    connect_with_app(&app, nickname, server_addr);
-    Ok(())
+    auth_common(
+        &app,
+        &state,
+        &server_addr,
+        &account,
+        tcp::AuthMode::Login { account: account.clone(), password },
+    )
 }
 
 #[tauri::command]
-pub fn connect(app: AppHandle, state: State<AppState>) -> Result<(), String> {
-    let cfg = state.config.lock().unwrap().clone();
-    if cfg.nickname.is_empty() {
-        return Err("请先设置昵称".into());
+pub fn auth_register(
+    app: AppHandle,
+    state: State<AppState>,
+    server_addr: String,
+    account: String,
+    password: String,
+    invite: String,
+) -> Result<(), String> {
+    auth_common(
+        &app,
+        &state,
+        &server_addr,
+        &account,
+        tcp::AuthMode::Register { account: account.clone(), password, invite },
+    )
+}
+
+/// 自动登录：用已保存的 auth_token 走 Resume
+#[tauri::command]
+pub fn auto_connect(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    let token = state.config.lock().unwrap().auth_token.clone();
+    if token.is_empty() {
+        return Err("没有可用的登录凭证".into());
     }
-    connect_with_app(&app, cfg.nickname, cfg.server_addr);
+    connect_with_app(&app, tcp::AuthMode::Resume { auth_token: token });
+    Ok(())
+}
+
+/// 认证命令公共部分：持久化服务器地址/账号后发起连接
+fn auth_common(
+    app: &AppHandle,
+    state: &State<AppState>,
+    server_addr: &str,
+    account: &str,
+    mode: tcp::AuthMode,
+) -> Result<(), String> {
+    {
+        let mut cfg = state.config.lock().unwrap();
+        cfg.server_addr = server_addr.to_string();
+        cfg.account = account.to_string();
+        cfg.save(&default_config_path()).map_err(|e| e.to_string())?;
+    }
+    connect_with_app(app, mode);
     Ok(())
 }
 
@@ -122,11 +202,28 @@ pub fn send_chat(state: State<AppState>, text: String) -> Result<(), String> {
     h.tx.send(NetCmd::SendChat(text)).map_err(|e| e.to_string())
 }
 
+/// 更新资料（昵称必填；avatar = None 不改头像）
+#[tauri::command]
+pub fn set_profile(state: State<AppState>, nickname: String, avatar: Option<Vec<u8>>) -> Result<(), String> {
+    let slot = state.net.lock().unwrap();
+    let h = slot.as_ref().ok_or("未连接")?;
+    h.tx.send(NetCmd::SetProfile { nickname, avatar }).map_err(|e| e.to_string())
+}
+
+/// 请求某人的头像（懒加载；服务器回 AvatarData 事件）
+#[tauri::command]
+pub fn avatar_request(state: State<AppState>, uid: u16) -> Result<(), String> {
+    let slot = state.net.lock().unwrap();
+    let h = slot.as_ref().ok_or("未连接")?;
+    h.tx.send(NetCmd::AvatarRequest(uid)).map_err(|e| e.to_string())
+}
+
 /// 用（新的）配置发起连接：先起新会话，再停掉旧会话（UI 事件无感切换）。
-pub fn connect_with_app(app: &AppHandle, nickname: String, addr: String) {
+pub fn connect_with_app(app: &AppHandle, mode: tcp::AuthMode) {
     let bridge = Bridge { app: app.clone() };
     let state = app.state::<AppState>();
-    let handle = tcp::spawn(addr, nickname, bridge, state.shared.clone());
+    let addr = state.config.lock().unwrap().server_addr.clone();
+    let handle = tcp::spawn(addr, mode, bridge, state.shared.clone());
     let mut slot = state.net.lock().unwrap();
     if let Some(old) = slot.take() {
         let _ = old.tx.send(NetCmd::Shutdown);

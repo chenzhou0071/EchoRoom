@@ -1,4 +1,4 @@
-//! TCP 控制客户端：登录、公屏、成员与说话状态事件；断线自动重连（退避）。
+//! TCP 控制客户端：注册/登录/自动登录、公屏、成员与说话状态事件；断线自动重连（退避）。
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
@@ -6,10 +6,19 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
-use echoroom_protocol::messages::{TcpMessage, STREAM_CAMERA, STREAM_SCREEN};
+use echoroom_protocol::messages::{MemberInfo, TcpMessage, STREAM_CAMERA, STREAM_SCREEN};
 use echoroom_protocol::tcp;
 
 use crate::bridge::{Bridge, ConnState};
+
+/// 认证方式（连接首消息三选一；登录成功后的断线重连自动走 Resume）
+#[derive(Clone, Debug)]
+pub enum AuthMode {
+    Login { account: String, password: String },
+    Register { account: String, password: String, invite: String },
+    /// 自动登录（有 auth_token 时的默认方式）
+    Resume { auth_token: String },
+}
 
 /// UI → 网络线程的命令
 pub enum NetCmd {
@@ -22,6 +31,10 @@ pub enum NetCmd {
     RequestKeyframe(u16),
     /// 上报本端某路流开/停（kind = STREAM_*）
     SetStream { kind: u8, on: bool },
+    /// 更新资料（昵称必填；avatar = None 表示不改头像）
+    SetProfile { nickname: String, avatar: Option<Vec<u8>> },
+    /// 请求某人的头像（懒加载）
+    AvatarRequest(u16),
     Shutdown,
 }
 
@@ -37,7 +50,7 @@ const BACKOFF_SECS: [u64; 4] = [1, 2, 5, 10];
 
 pub fn spawn(
     addr: String,
-    nickname: String,
+    mode: AuthMode,
     bridge: Bridge,
     shared: crate::audio::session::SharedAudio,
 ) -> NetHandle {
@@ -47,7 +60,7 @@ pub fn spawn(
     let (uid_c, tok_c) = (my_uid.clone(), my_token.clone());
     let tx_for_loop = tx.clone(); // 采集线程 VAD 的 SetSpeaking 命令经会话线程写 TCP
     std::thread::spawn(move || {
-        run_loop(addr, nickname, bridge, rx, uid_c, tok_c, tx_for_loop, shared)
+        run_loop(addr, mode, bridge, rx, uid_c, tok_c, tx_for_loop, shared)
     });
     NetHandle { tx, my_uid, my_token }
 }
@@ -56,15 +69,33 @@ pub fn spawn(
 enum SessionEnd {
     /// 连接断开（服务端关闭或读错误）：从最短退避重新开始
     Disconnected,
-    /// 被服务器拒绝（如房间满）：退避递增，避免高频重试
-    Rejected,
+    /// 认证失败（账号密码错误 / Resume 过期 / 房间满）：停止重连，交还 UI
+    AuthFailed(String),
     /// 收到 Shutdown 命令：线程退出
     Shutdown,
 }
 
+/// 本轮连接的首消息：有 auth_token 一律走 Resume（登录成功后的重连同路径）
+fn first_message(mode: &AuthMode, token: Option<&str>) -> TcpMessage {
+    match token {
+        Some(t) => TcpMessage::Resume { auth_token: t.to_string() },
+        None => match mode {
+            AuthMode::Login { account, password } => {
+                TcpMessage::Login { account: account.clone(), password: password.clone() }
+            }
+            AuthMode::Register { account, password, invite } => TcpMessage::Register {
+                account: account.clone(),
+                password: password.clone(),
+                invite: invite.clone(),
+            },
+            AuthMode::Resume { auth_token } => TcpMessage::Resume { auth_token: auth_token.clone() },
+        },
+    }
+}
+
 fn run_loop(
     addr: String,
-    nickname: String,
+    mode: AuthMode,
     bridge: Bridge,
     rx: Receiver<NetCmd>,
     my_uid: Arc<AtomicU16>,
@@ -73,10 +104,20 @@ fn run_loop(
     shared: crate::audio::session::SharedAudio,
 ) {
     let mut attempt = 0usize;
+    // 自动登录凭证：初始来自 Resume 模式；Login/Register 成功后由 LoginOk 滚动更新
+    let mut auth_token: Option<String> = match &mode {
+        AuthMode::Resume { auth_token } => Some(auth_token.clone()),
+        _ => None,
+    };
     loop {
         bridge.emit_conn(if attempt == 0 { ConnState::Connecting } else { ConnState::Reconnecting });
+        let used_resume = auth_token.is_some();
+        let first = first_message(&mode, auth_token.as_deref());
         let result = match TcpStream::connect(&addr) {
-            Ok(mut stream) => run_session(&mut stream, &addr, &nickname, &bridge, &rx, &my_uid, &my_token, &tx, &shared),
+            Ok(mut stream) => run_session(
+                &mut stream, &addr, &first, &mut auth_token, &bridge, &rx, &my_uid, &my_token, &tx,
+                &shared,
+            ),
             Err(e) => {
                 eprintln!("[net] 连接失败: {e}");
                 Err(e)
@@ -88,7 +129,16 @@ fn run_loop(
                 attempt = 0;
                 bridge.emit_conn(ConnState::Reconnecting);
             }
-            Ok(SessionEnd::Rejected) => bridge.emit_conn(ConnState::Reconnecting),
+            Ok(SessionEnd::AuthFailed(reason)) => {
+                eprintln!("[net] 认证失败: {reason}");
+                if used_resume {
+                    // Resume 失效（凭证被清 / 服务器换库）：清 token 回登录页
+                    bridge.clear_auth_token();
+                }
+                bridge.emit_conn(ConnState::Rejected(reason.clone()));
+                bridge.emit_auth_fail(reason);
+                return; // 不自动重试，交还 UI 决定下一步
+            }
             Err(e) => {
                 eprintln!("[net] 会话结束: {e}");
                 bridge.emit_conn(ConnState::Reconnecting);
@@ -120,7 +170,8 @@ fn wait_or_shutdown(rx: &Receiver<NetCmd>, total: Duration) -> bool {
 fn run_session(
     stream: &mut TcpStream,
     addr: &str,
-    nickname: &str,
+    first: &TcpMessage,
+    auth_token: &mut Option<String>,
     bridge: &Bridge,
     rx: &Receiver<NetCmd>,
     my_uid: &AtomicU16,
@@ -128,8 +179,9 @@ fn run_session(
     tx: &Sender<NetCmd>,
     shared: &crate::audio::session::SharedAudio,
 ) -> std::io::Result<SessionEnd> {
-    stream.write_all(&tcp::encode(&TcpMessage::Login { nickname: nickname.to_string() }))?;
+    stream.write_all(&tcp::encode(first))?;
     stream.set_read_timeout(Some(Duration::from_millis(50)))?;
+    let mut authenticated = false; // AuthReject 双语义：未认证 = 断开；已认证 = 资料错误提示
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -157,6 +209,12 @@ fn run_session(
                 NetCmd::SetStream { kind, on } => {
                     stream.write_all(&tcp::encode(&TcpMessage::StreamState { uid: 0, kind, on }))?;
                 }
+                NetCmd::SetProfile { nickname, avatar } => {
+                    stream.write_all(&tcp::encode(&TcpMessage::SetProfile { nickname, avatar }))?;
+                }
+                NetCmd::AvatarRequest(uid) => {
+                    stream.write_all(&tcp::encode(&TcpMessage::AvatarRequest { uid }))?;
+                }
                 NetCmd::Shutdown => return Ok(SessionEnd::Shutdown),
             }
         }
@@ -175,26 +233,31 @@ fn run_session(
                 Ok(Some((msg, used))) => {
                     buf.drain(..used);
                     match msg {
-                        TcpMessage::LoginOk { uid, token, members } => {
+                        TcpMessage::LoginOk { uid, udp_token, auth_token: fresh_token, members } => {
+                            authenticated = true;
                             my_uid.store(uid, Ordering::Relaxed);
-                            my_token.store(token, Ordering::Relaxed);
+                            my_token.store(udp_token, Ordering::Relaxed);
+                            // 凭证滚动：Login/Register 签发新 token，Resume 换取新 token
+                            *auth_token = Some(fresh_token.clone());
+                            bridge.save_auth_token(fresh_token);
                             bridge.emit_conn(ConnState::Connected);
-                            // 重建 uid → 昵称映射（含自己；重连场景先清空）
+                            // 重建 uid → 昵称映射（members 已含自己；重连场景先清空）
                             {
                                 let mut names = shared.uid_names.lock().unwrap();
                                 names.clear();
-                                for (u, n, _, _) in &members {
+                                for (u, n, _, _, _) in &members {
                                     names.insert(*u, n.clone());
                                 }
-                                names.insert(uid, nickname.to_string());
                             }
                             bridge.emit_self_uid(uid);
-                            // 服务器返回的列表不含自己：补上后整表发给 UI；
                             // 自己的 muted 取本地当前值（重连后保持界面与实际一致）
                             let my_muted = shared.self_muted.load(Ordering::Relaxed);
-                            let mut all = members;
-                            all.push((uid, nickname.to_string(), my_muted, 0));
+                            let all: Vec<MemberInfo> = members
+                                .into_iter()
+                                .map(|(u, n, m, s, h)| (u, n, if u == uid { my_muted } else { m }, s, h))
+                                .collect();
                             bridge.emit_member_list(all);
+                            bridge.emit_auth_ok();
                             // 重连后若本地处于静音，向新会话重新声明（否则服务器端 muted=false，别人看不到）
                             if my_muted {
                                 stream.write_all(&tcp::encode(&TcpMessage::Mute { uid: 0, on: true }))?;
@@ -211,15 +274,20 @@ fn run_session(
                             // 观众数随新会话归零（服务器接线后会推回真实值）
                             shared.viewer_count.store(0, Ordering::Relaxed);
                             // 启动音频链路（麦克风/编码/播放/VAD 上报；失败不影响文字聊天）
-                            crate::bridge::start_audio(&bridge.app, uid, token, addr.to_string(), tx.clone());
+                            crate::bridge::start_audio(&bridge.app, uid, udp_token, addr.to_string(), tx.clone());
                         }
-                        TcpMessage::LoginReject { reason } => {
-                            bridge.emit_conn(ConnState::Rejected(reason));
-                            return Ok(SessionEnd::Rejected);
+                        TcpMessage::AuthReject { reason } => {
+                            if authenticated {
+                                // 已进房：资料更新失败等（不断开）
+                                bridge.emit_profile_error(reason);
+                            } else {
+                                // 未进房：认证失败（含房间满）→ 停止重连
+                                return Ok(SessionEnd::AuthFailed(reason));
+                            }
                         }
-                        TcpMessage::MemberJoin { uid, nickname } => {
+                        TcpMessage::MemberJoin { uid, nickname, has_avatar } => {
                             shared.uid_names.lock().unwrap().insert(uid, nickname.clone());
-                            bridge.emit_member_join(uid, nickname)
+                            bridge.emit_member_join(uid, nickname, has_avatar)
                         }
                         TcpMessage::MemberLeave { uid } => {
                             shared.uid_names.lock().unwrap().remove(&uid);
@@ -234,6 +302,11 @@ fn run_session(
                             bridge.emit_viewer_count(&uids);
                         }
                         TcpMessage::RequestKeyframe { .. } => bridge.emit_request_keyframe(),
+                        TcpMessage::ProfileChanged { uid, nickname } => {
+                            shared.uid_names.lock().unwrap().insert(uid, nickname.clone());
+                            bridge.emit_profile_changed(uid, nickname)
+                        }
+                        TcpMessage::AvatarData { uid, data } => bridge.emit_avatar_data(uid, data),
                         _ => {}
                     }
                 }

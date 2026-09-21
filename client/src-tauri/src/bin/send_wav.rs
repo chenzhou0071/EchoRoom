@@ -1,7 +1,8 @@
 //! 测试工具：把一段 WAV 录音用真实 Opus 链路按 20ms/帧实时发送到服务器，
 //! 模拟"一个正在说话的真实客户端"（供真人收听/看蓝框验证链路）。
 //! 说话状态（VAD）与真人客户端一致：能量双阈值检测，翻转时经 TCP 上报。
-//! 用法：cargo run --bin send_wav -- <服务器addr> <wav路径> [循环遍数，默认 1] [遍间停顿秒数，默认 0]
+//! 用法：cargo run --bin send_wav -- <服务器addr> <wav路径> [循环遍数，默认 1] [遍间停顿秒数，默认 0] [邀请码]
+//! 账号固定 wavbot：提供邀请码时先注册（已存在自动回退登录），否则直接登录（需已注册过）。
 //! WAV 要求 48kHz 单声道 16bit PCM（可直接用 mic_record 录制）。
 use std::io::{Read, Write};
 use std::net::{TcpStream, UdpSocket};
@@ -18,26 +19,43 @@ fn main() -> anyhow::Result<()> {
     let wav_path = match args.get(2) {
         Some(p) => p.clone(),
         None => {
-            println!("用法: cargo run --bin send_wav -- <服务器addr> <wav路径> [循环遍数，默认 1] [遍间停顿秒数，默认 0]");
+            println!("用法: cargo run --bin send_wav -- <服务器addr> <wav路径> [循环遍数，默认 1] [遍间停顿秒数，默认 0] [邀请码]");
             return Ok(());
         }
     };
     let loops: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
     let gap_secs: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let invite = args.get(5).cloned();
 
     let pcm = load_wav_48k_mono(&wav_path)?;
     let secs = pcm.len() as f64 / 48000.0;
     println!("已读取 {wav_path}（{secs:.1}s）");
 
     // ---- TCP 登录拿 uid/token ----
+    let account = "wavbot".to_string();
+    let password = "pw-wavbot-123456".to_string();
     let mut stream = TcpStream::connect(&addr)?;
-    stream.write_all(&tcp::encode(&TcpMessage::Login { nickname: "wavbot".into() }))?;
+    // 提供邀请码：先注册（撞名自动回退登录）；未提供：要求 wavbot 已注册，直接登录
+    let first = match &invite {
+        Some(code) => TcpMessage::Register {
+            account: account.clone(),
+            password: password.clone(),
+            invite: code.clone(),
+        },
+        None => TcpMessage::Login { account: account.clone(), password: password.clone() },
+    };
+    stream.write_all(&tcp::encode(&first))?;
     stream.set_read_timeout(Some(Duration::from_millis(20)))?;
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 1024];
-    let (mut uid, mut token) = (0u16, 0u32);
+    let (mut uid, mut udp_token) = (0u16, 0u32);
+    let mut fallback_done = false; // 注册撞名后是否已回退登录（防死循环）
+    let mut rejected: Option<String> = None;
     let deadline = Instant::now() + Duration::from_secs(5);
     while uid == 0 {
+        if let Some(reason) = &rejected {
+            anyhow::bail!("认证失败：{reason}");
+        }
         if Instant::now() > deadline {
             anyhow::bail!("登录超时（服务器无响应）");
         }
@@ -47,9 +65,23 @@ fn main() -> anyhow::Result<()> {
                 buf.extend_from_slice(&chunk[..n]);
                 while let Ok(Some((msg, used))) = tcp::try_decode(&buf) {
                     buf.drain(..used);
-                    if let TcpMessage::LoginOk { uid: u, token: t, .. } = msg {
-                        uid = u;
-                        token = t;
+                    match msg {
+                        TcpMessage::LoginOk { uid: u, udp_token: t, .. } => {
+                            uid = u;
+                            udp_token = t;
+                        }
+                        TcpMessage::AuthReject { reason } => {
+                            if invite.is_some() && reason == "账号已存在" && !fallback_done {
+                                fallback_done = true;
+                                println!("wavbot 已注册，回退登录");
+                                let login =
+                                    TcpMessage::Login { account: account.clone(), password: password.clone() };
+                                stream.write_all(&tcp::encode(&login))?;
+                            } else {
+                                rejected = Some(reason);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -61,7 +93,7 @@ fn main() -> anyhow::Result<()> {
     // ---- UDP 注册 ----
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     sock.connect(&addr)?;
-    sock.send(&udp::encode(uid, 0, &UdpPacket::Register { token }))?;
+    sock.send(&udp::encode(uid, 0, &UdpPacket::Register { token: udp_token }))?;
 
     // ---- 预编码全部帧（顺便算每帧 RMS 供 VAD 使用）----
     let mut enc = OpusEnc::new().map_err(|e| anyhow::anyhow!("编码器创建失败: {e}"))?;
