@@ -13,9 +13,9 @@
 - 协议改造：TCP type 1 `Login{account,password}`（替换 `{nickname}`）、2 `LoginOk{uid,udp_token,auth_token,members}`（字段重命名，members 含自己）、7 `LoginReject`→`AuthReject{reason}`（改名复用）；新增 15 `Register{account,password,invite}`、16 `Resume{auth_token}`、17 `SetProfile{nickname,avatar:Option<Vec<u8>>}`、18 `ProfileChanged{uid,nickname}`、19 `AvatarRequest{uid}`、20 `AvatarData{uid,data}`
 - 成员元组全局五元组 `(uid, nickname, muted, streams, has_avatar)`；`MemberJoin` 同步加 `has_avatar: bool`
 - bytes 字段编码 `[len u32][原始字节]`；`try_decode` 长度上限由 `64*1024` 提高到 `256*1024`（容纳头像单帧）
-- 账号 `[A-Za-z0-9][A-Za-z0-9_]{2,19}`（3-20 位、不能以 `_` 开头）原样存储、大小写敏感（`Alice` 与 `alice` 是两个独立账号）；密码 6–64 字符（大小写敏感）；昵称 1–24 字符（允许重复，默认=账号名）；头像 ≤64KB（客户端缩 256×256 居中裁剪 JPEG q85）
+- 账号 `[A-Za-z0-9][A-Za-z0-9_]{2,19}`（3-20 位、不能以 `_` 开头）原样存储、大小写敏感（`Alice` 与 `alice` 是两个独立账号）；密码 6–64 字符、仅英文/数字/符号（大小写敏感）；昵称 1–24 字符（允许重复，默认=账号名）；头像 ≤64KB（客户端缩 256×256 居中裁剪 JPEG q85）
 - 每账号最多 8 条 auth_token（超出删最旧）；auth_token = 16 字节真随机 → 32 位 hex；UDP token 同步换真随机（`rand::rngs::OsRng`）
-- 错误文案（服务器下发，客户端原样展示）：`未开放注册` / `邀请码错误` / `账号已存在` / `账号格式不合法（3-20 位字母数字下划线，不能以 _ 开头）` / `密码至少 6 位` / `密码过长（上限 64 字符）` / `昵称不合法（1-24 字符）` / `头像过大（上限 64KB）`；登录统一 `账号或密码错误`（不泄露账号是否存在）；Resume 失效 `登录已过期`；房间满 `房间已满（6人）`
+- 错误文案（服务器下发，客户端原样展示）：`未开放注册` / `邀请码错误` / `账号已存在` / `账号格式不合法（3-20 位字母数字下划线，不能以 _ 开头）` / `密码至少 6 位` / `密码过长（上限 64 字符）` / `密码只能包含英文、数字或符号` / `昵称不合法（1-24 字符）` / `头像过大（上限 64KB）`；登录统一 `账号或密码错误`（不泄露账号是否存在）；Resume 失效 `登录已过期`；房间满 `房间已满（6人）`
 - 服务器参数：位置参数 port（默认 9000）、`--data <目录>`（默认 `./data`，DB = `<data>/echoroom.db`，启动自动建目录/建表）、`--invite <码>`（未配置 = 拒绝一切注册）
 - ⚠ C 为协议**破坏性升级**（复用 type 1/2/7 改语义），无法像 B 那样逐任务保持编译全绿：**Task 1 结束时仅 `echoroom-protocol` 可测（server/client 编译断裂属预期状态）**；Task 2 结束 server 恢复可测；Task 3 结束 workspace 恢复全绿。Task 1–2 期间不要试图在包之间来回打补丁，按任务顺序推进即可
 - Task 3 起每个任务结束时全 workspace 编译通过、已有测试全绿
@@ -858,6 +858,10 @@ pub fn validate_password(password: &str) -> Result<(), String> {
     if n > 64 {
         return Err("密码过长（上限 64 字符）".into());
     }
+    // 仅允许 ASCII 字母、数字、符号（拒绝中文/空格/emoji）
+    if !password.chars().all(|c| c.is_ascii_alphanumeric() || c.is_ascii_punctuation()) {
+        return Err("密码只能包含英文、数字或符号".into());
+    }
     Ok(())
 }
 
@@ -1036,6 +1040,10 @@ mod tests {
         assert_eq!(
             register(&db, Some("code-1"), "alice", "12345", "code-1").unwrap_err(),
             "密码至少 6 位"
+        );
+        assert_eq!(
+            register(&db, Some("code-1"), "alice", "密码123456", "code-1").unwrap_err(),
+            "密码只能包含英文、数字或符号"
         );
         // 大小写敏感：Alice 与 alice 是两个独立账号，可各自注册
         register(&db, Some("code-1"), "Alice", "pw123456", "code-1").unwrap();
@@ -2636,7 +2644,7 @@ Expected: workspace 编译通过（client bin `Echo` 链接成功；`cargo check
       <h2 id="setup-title">登录 Echo</h2>
       <input id="setup-server" type="text" maxlength="64" value="127.0.0.1:9000" placeholder="服务器地址 host:port" />
       <input id="setup-account" type="text" maxlength="20" placeholder="账号（3-20 位字母数字下划线，不能以 _ 开头）" autocomplete="off" />
-      <input id="setup-password" type="password" maxlength="64" placeholder="密码（至少 6 位）" autocomplete="off" />
+      <input id="setup-password" type="password" maxlength="64" placeholder="密码（6-64 位英文/数字/符号）" autocomplete="off" />
       <input id="setup-invite" type="text" maxlength="64" placeholder="邀请码" hidden />
       <div class="setup-error" id="setup-error" hidden></div>
       <button id="setup-submit">登录</button>
@@ -3195,7 +3203,7 @@ Expected: 无输出（语法通过）。
 - Consumes: Task 1–5 的全部功能；验收依赖两台客户端（或一台客户端 + sim_clients）
 - Produces: 0.2.0 安装包与免安装 exe（交付物）
 
-- [ ] **Step 1: 版本号升级**
+- [x] **Step 1: 版本号升级**
 
 `client/src-tauri/tauri.conf.json`：
 ```json
@@ -3205,7 +3213,7 @@ Expected: 无输出（语法通过）。
   "version": "0.2.0",
 ```
 
-- [ ] **Step 2: 全量测试与构建**
+- [x] **Step 2: 全量测试与构建**
 
 Run: `cargo test`
 Expected: 全绿（protocol + server + client 全部测例）。
@@ -3242,7 +3250,7 @@ cd E:\pro\EchoRoom; cargo run -p echoroom-server --bin sim_clients -- 127.0.0.1:
 ```
 Expected: 3 个模拟客户端注册成功（可再跑一次验证"账号已存在 → 回退登录"路径）；收到 LoginOk 与 UDP RegisterAck；退出时打印各 uid 语音包统计。
 
-- [ ] **Step 5: 桌面构建与产物拷贝**
+- [x] **Step 5: 桌面构建与产物拷贝**
 
 ```powershell
 cd E:\pro\EchoRoom\client\src-tauri; cargo tauri build
