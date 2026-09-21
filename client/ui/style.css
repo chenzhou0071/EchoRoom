@@ -305,6 +305,22 @@ body {
   cursor: pointer;
 }
 
+/* ---- C：登录/注册与资料弹窗 ---- */
+.setup-error {
+  color: var(--err);
+  font-size: 12px;
+  text-align: center;
+}
+.setup-panel .setup-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+.setup-panel .setup-link:hover { text-decoration: underline; }
+
 /* ---- B：观看视图（覆盖 #members 区域；观看与自预览共用） ---- */
 .view {
   position: absolute;

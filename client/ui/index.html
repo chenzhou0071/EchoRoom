@@ -42,10 +42,24 @@
 
   <div class="setup-mask hidden" id="setup-mask">
     <div class="setup-panel">
-      <h2>进入 Echo</h2>
-      <input id="setup-nickname" type="text" maxlength="24" placeholder="你的昵称" />
+      <h2 id="setup-title">登录 Echo</h2>
       <input id="setup-server" type="text" maxlength="64" value="127.0.0.1:9000" placeholder="服务器地址 host:port" />
-      <button id="setup-connect">连接</button>
+      <input id="setup-account" type="text" maxlength="20" placeholder="账号（3-20 位字母数字下划线，不能以 _ 开头）" autocomplete="off" />
+      <input id="setup-password" type="password" maxlength="64" placeholder="密码（至少 6 位）" autocomplete="off" />
+      <input id="setup-invite" type="text" maxlength="64" placeholder="邀请码" hidden />
+      <div class="setup-error" id="setup-error" hidden></div>
+      <button id="setup-submit">登录</button>
+      <button class="setup-link" id="setup-toggle" type="button">没有账号？注册</button>
+    </div>
+  </div>
+
+  <div class="setup-mask hidden" id="profile-mask">
+    <div class="setup-panel">
+      <h2>完善资料</h2>
+      <input id="profile-nickname" type="text" maxlength="24" placeholder="昵称（1-24 字符）" />
+      <div class="setup-error" id="profile-error" hidden></div>
+      <button id="profile-submit">保存</button>
+      <button class="setup-link" id="profile-skip" type="button">以后再说</button>
     </div>
   </div>
 

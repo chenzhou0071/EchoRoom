@@ -12,6 +12,11 @@ let shareAudioOn = true;
 let screenAudioOk = false; // Win11 22000+；init 时查询
 let lastViewerUids = []; // R1：最近一次观看名单（投屏面板"正在观看"行）
 
+// C：认证与资料
+let authMode = "login"; // "login" | "register"
+let lastAuthAttempt = null; // 最近一次提交的意图（auth_ok 判断是否弹资料窗）
+let profileSubmitting = false; // 资料提交中：等 profile_changed 广播回来才关弹窗
+
 // ---- 图标（feather 风格内联 SVG，currentColor 随按钮状态变色）----
 const ICONS = {
   mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>',
@@ -550,25 +555,103 @@ el("chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendCurrent();
 });
 
-// ---- 首次启动：昵称 / 服务器设置面板 ----
-async function submitSetup() {
-  const nickname = el("setup-nickname").value.trim();
+// ---- C：登录 / 注册面板 ----
+const setupMask = el("setup-mask");
+
+function showAuthError(msg) {
+  const node = el("setup-error");
+  node.hidden = !msg;
+  node.textContent = msg;
+}
+
+function showAuthPanel(mode, error) {
+  authMode = mode;
+  el("setup-title").textContent = mode === "register" ? "注册 Echo" : "登录 Echo";
+  el("setup-submit").textContent = mode === "register" ? "注册" : "登录";
+  el("setup-toggle").textContent = mode === "register" ? "已有账号？登录" : "没有账号？注册";
+  el("setup-invite").hidden = mode !== "register";
+  showAuthError(error || "");
+  setupMask.classList.remove("hidden");
+}
+
+async function submitAuth() {
   const serverAddr = el("setup-server").value.trim();
-  if (!nickname || !serverAddr) return;
+  const account = el("setup-account").value.trim();
+  const password = el("setup-password").value;
+  const invite = el("setup-invite").value.trim();
+  if (!serverAddr || !account || !password) {
+    showAuthError("请填写服务器地址、账号与密码");
+    return;
+  }
+  const btn = el("setup-submit");
+  btn.disabled = true; // 防止重复提交；成功经 auth_ok 复位、失败经 auth_fail 复位
+  showAuthError("");
+  lastAuthAttempt = authMode;
   try {
-    await invoke("set_config", { nickname, serverAddr }); // 保存后 Rust 侧自动发起连接
-    el("setup-mask").classList.add("hidden");
+    if (authMode === "register") {
+      await invoke("auth_register", { serverAddr, account, password, invite });
+    } else {
+      await invoke("auth_login", { serverAddr, account, password });
+    }
   } catch (e) {
-    console.error("保存配置失败:", e);
+    // 命令层失败（如配置写盘失败）：立即复位；服务器拒绝经 auth_fail 事件回来
+    showAuthError(String(e));
+    btn.disabled = false;
   }
 }
 
-el("setup-connect").addEventListener("click", submitSetup);
-for (const id of ["setup-nickname", "setup-server"]) {
+el("setup-submit").addEventListener("click", submitAuth);
+el("setup-toggle").addEventListener("click", () => {
+  showAuthPanel(authMode === "register" ? "login" : "register");
+});
+for (const id of ["setup-server", "setup-account", "setup-password", "setup-invite"]) {
   el(id).addEventListener("keydown", (e) => {
-    if (e.key === "Enter") submitSetup();
+    if (e.key === "Enter") submitAuth();
   });
 }
+
+// ---- C：完善资料弹窗（昵称；头像在 Task 5 接入） ----
+function showProfileError(msg) {
+  const node = el("profile-error");
+  node.hidden = !msg;
+  node.textContent = msg;
+}
+
+function openProfilePop(defaultName) {
+  showProfileError("");
+  el("profile-nickname").value = defaultName || "";
+  el("profile-mask").classList.remove("hidden");
+  el("profile-nickname").focus();
+}
+
+function closeProfilePop() {
+  el("profile-mask").classList.add("hidden");
+  profileSubmitting = false;
+  el("profile-submit").disabled = false;
+}
+
+function submitProfile() {
+  const nickname = el("profile-nickname").value.trim();
+  if (!nickname) {
+    showProfileError("请填写昵称（1-24 字符）");
+    return;
+  }
+  profileSubmitting = true;
+  el("profile-submit").disabled = true;
+  showProfileError("");
+  invoke("set_profile", { nickname, avatar: null }).catch((e) => {
+    // 命令层失败（未连接等）：复位；服务器校验失败经 profile_error 事件回来
+    profileSubmitting = false;
+    el("profile-submit").disabled = false;
+    showProfileError(String(e));
+  });
+}
+
+el("profile-submit").addEventListener("click", submitProfile);
+el("profile-skip").addEventListener("click", closeProfilePop);
+el("profile-nickname").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") submitProfile();
+});
 
 // ---- 事件接线与启动 ----
 async function init() {
@@ -579,8 +662,8 @@ async function init() {
   });
   await listen("members", (e) => {
     members.clear();
-    for (const [uid, nickname, muted, streams] of e.payload) {
-      members.set(uid, { nickname, speaking: false, muted, streams });
+    for (const [uid, nickname, muted, streams, hasAvatar] of e.payload) {
+      members.set(uid, { nickname, speaking: false, muted, streams, hasAvatar });
     }
     renderMembers();
     renderOnline();
@@ -590,8 +673,8 @@ async function init() {
     }
   });
   await listen("member_join", (e) => {
-    const [uid, nickname] = e.payload;
-    members.set(uid, { nickname, speaking: false, muted: false, streams: 0 });
+    const [uid, nickname, hasAvatar] = e.payload;
+    members.set(uid, { nickname, speaking: false, muted: false, streams: 0, hasAvatar });
     renderMembers();
     renderOnline();
     playSnd(sndIn); // 别人进入
@@ -670,6 +753,36 @@ async function init() {
     }
   });
 
+  // C：认证结果
+  await listen("auth_ok", () => {
+    el("setup-mask").classList.add("hidden");
+    el("setup-submit").disabled = false;
+    el("setup-password").value = "";
+    showAuthError("");
+    const wasRegister = lastAuthAttempt === "register";
+    lastAuthAttempt = null;
+    if (wasRegister) openProfilePop(el("setup-account").value.trim()); // 注册成功 → 弹「完善资料」
+  });
+  await listen("auth_fail", (e) => {
+    el("setup-submit").disabled = false;
+    showAuthPanel(lastAuthAttempt === "register" ? "register" : "login", String(e.payload));
+    lastAuthAttempt = null;
+  });
+  await listen("profile_changed", (e) => {
+    const { uid, nickname } = e.payload;
+    const m = members.get(uid);
+    if (m) m.nickname = nickname;
+    renderMembers();
+    renderOnline();
+    if (profileSubmitting && uid === myUid) closeProfilePop(); // 自己保存成功：广播回来才关窗
+  });
+  await listen("profile_error", (e) => {
+    if (!profileSubmitting) return;
+    profileSubmitting = false;
+    el("profile-submit").disabled = false;
+    showProfileError(String(e.payload));
+  });
+
   const cfg = await invoke("get_config");
   // 音量真值来自 Rust（config 持久化）：初始化本地副本
   volState = { self_gain: cfg.self_gain, muted: cfg.muted, peer_gains: cfg.peer_gains };
@@ -680,11 +793,16 @@ async function init() {
   shareAudioOn = cfg.share_audio !== false;
   screenAudioOk = await invoke("screen_audio_supported").catch(() => false);
   applyShareAudioUi();
-  if (!cfg.nickname) {
-    el("setup-mask").classList.remove("hidden");
-    el("setup-nickname").focus();
+  // C：表单预填 + 自动登录（有 token 走 Resume；否则显示登录面板）
+  el("setup-server").value = cfg.server_addr || "127.0.0.1:9000";
+  if (cfg.account) el("setup-account").value = cfg.account;
+  if (cfg.auth_token) {
+    invoke("auto_connect").catch((e) => {
+      console.error("自动登录失败:", e);
+      showAuthPanel("login");
+    });
   } else {
-    await invoke("connect"); // 打开即自动连接
+    showAuthPanel("login");
   }
 }
 
