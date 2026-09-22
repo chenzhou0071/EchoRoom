@@ -148,12 +148,12 @@
 （accent-soft = 各主题 accent 的 15% 透明版；accent 用于按钮/说话框/聚焦边/链接/激活态）
 
 **背景图**：
-- 选择：`<input type=file accept=image/*>`（与头像选择一致）；**上限 10MB**（前端校验 + Rust 兜底）
-- 存储：Rust 复制到本地数据目录（`%APPDATA%\com.echoroom.dev\background.<ext>`）；**换图/清除时删除旧文件**
-- 铺层：铺满侧栏 + 成员卡片区 + 聊天区 + 底部输入栏（主工作区整体）；图片上叠一层**主题背景色约 72% 不透明度的罩**，保证卡片/文字可读且与主题协调
-- 清除：删文件 + 清 config → 恢复纯色
-- **设置页不铺背景**（保持纯色，内容清晰）
-- 启动加载：读 config → 读取文件 bytes → Blob 铺层（复用头像的 bytes→Blob 手法）
+- 选择：`<input type=file accept=image/*>`（与头像选择一致）；**上限 10MB**（前端校验 + Rust 兜底）；文件读为 ArrayBuffer 后以**原始字节体**上传（WebView 拿不到 `File.path`，不走路径复制）
+- 存储：Rust 写本地数据目录单文件 `%APPDATA%\com.echoroom.dev\background.img`（无扩展名）；入库前校验**文件头白名单（PNG / JPEG / WebP）**，非白名单拒绝并提示
+- 换图：直接覆盖同一文件（天然无旧图残留）；清除：删文件 → 恢复纯色；**无 config 字段**（文件存在即生效）
+- 铺层：`.app-body` 双伪元素——`::before` 铺背景图（`--bg-image` 变量，cover），`::after` 叠主题背景色约 72% 罩，`.app-body > *` 抬升到罩上方；覆盖侧栏 + 成员卡片区 + 聊天区 + 底部输入栏（主工作区整体），保证卡片/文字可读且与主题协调；无图时罩色 = 背景色（视觉零差异）
+- **设置页不铺背景**（高层覆盖，天然纯色）
+- 启动加载：`get_background()` 读回 ArrayBuffer（空 = 无图）→ 文件头嗅探 MIME → Blob 铺层（复用头像的 bytes→Blob 手法）
 
 ## 3. 关键决策记录
 
@@ -166,11 +166,11 @@
 | 扬声器切换实现 | 播放线程外层重初始化循环 | fill 闭包状态（抖动缓冲/解码器）完整跨设备保留 |
 | 设备偏好表示 | 空串 = 系统默认（config 沿用空串风格） | 兼容现状；serde default 兼容旧配置 |
 | 音效扩展方式 | 目录约定 + 注册表一行 | 用户后续会补充音效；零架构改动 |
-| 背景图存储 | 复制入数据目录，bytes→Blob 加载 | 原文件移动/删除不受影响；复用头像既有手法 |
+| 背景图存储 | 单文件 `background.img` + 文件头嗅探 MIME + 原始字节通道 | Tauri v2 拿不到 `File.path`；无 config 字段（文件存在即生效），换图覆盖/清除即删 |
 | 摄像头设备 | 浏览器 enumerateDevices + deviceId | 前端直接支持，Rust 无涉 |
 | 登出 | 客户端清凭证 + 断开；不通知服务器 | token 有 24h 滑动过期；无需协议改动 |
 | 协议/服务器 | 零改动 | 纯客户端功能 |
-| 版本 | workspace bump 0.2.0 → 0.3.0 | 功能新增；协议未破坏 |
+| 版本 | 仅 `tauri.conf.json` 升 0.3.0（workspace `Cargo.toml` 保持 0.1.0 不动，与 C 做法一致） | 功能新增；协议未破坏 |
 
 ## 4. 技术设计
 
@@ -178,8 +178,8 @@
 
 - **枚举**：wasapi 设备集合（Capture / Render）→ 每项 `{ id, name, is_default }`（is_default 与系统默认端点 id 比对）
 - **`MicCapture::open` 改造**：接受 `Option<&str>` 设备 id；None → 默认设备；指定 id 不存在 → 返回错误（由上层回退）
-- **采集线程**：每轮循环检查 `SharedAudio.input_device` 是否变化 → 变化则 drop 旧句柄、按新偏好重开（失败 → 回退默认 + 上报事件）
-- **播放线程**：`run_player` 改为外层循环：`loop { init_render(当前偏好) → render_loop(检测偏好变化则主动退出) }`；重开设备前后**同一 fill 闭包**，抖动缓冲/解码器/屏幕音频队列状态完整保留；新设备失败 → 回退默认重试，再失败上报事件并继续用默认
+- **采集线程**：每轮循环检查 `SharedAudio.input_device` 是否变化 → 变化则 drop 旧句柄、按新偏好重开；**启动首开与运行中切换共用同一回退路径**（失败 → 清偏好 + 回退默认 + 上报事件）
+- **播放线程**：`run_player` 改为外层循环：`loop { init_render(当前偏好) → render_loop(检测偏好变化则主动退出) }`；重开设备前后**同一 fill 闭包**，抖动缓冲/解码器/屏幕音频队列状态完整保留；**启动时偏好设备打开失败 → 清偏好 + 回退默认重初始化（不使管线启动失败）**；运行中新设备失败 → 同样回退默认重试，再失败上报事件并继续用默认
 - **共享偏好**：`SharedAudio` 增加 `input_device` / `output_device`（`Arc<Mutex<Option<String>>>`；None=系统默认，config 的空串在启动加载时转为 None）
 - **事件**：新增 `audio_device_fallback`（方向 + 原因）→ 设置页内联提示
 - **可测性**：偏好比较与回退决策抽成纯函数单测；硬件打开本身不做单测
@@ -193,7 +193,7 @@
 - CSS：6 组 `:root[data-theme="<id>"] { --bg/--panel/--text/--border/--accent/--accent-soft ... }`；默认组为现状值
 - **顺手改造**：将 CSS 中硬编码的派生色（如按钮激活态 `rgba(59,130,246,.15)`、`rgba(248,113,113,.15)`）改为变量（`--accent-soft` / `--err-soft`），此后加主题不再动样式
 - 应用：JS 设 `document.documentElement.dataset.theme`（启动时尽早应用防闪烁）+ 存 `config.theme`
-- 背景图（Rust）：`set_background(Option<String>)`——Some 复制文件（先删旧）+ 记扩展名；None 删除文件；`get_background() -> Option<(Vec<u8>, String)>`（bytes + mime）；config 存 `background_ext: String`（空 = 无）
+- 背景图（Rust，文件驱动）：`set_background(request)` 收原始字节体（≤10MB + 文件头白名单校验）→ 写单文件 `background.img`（直接覆盖）；`clear_background()` 删文件（无图静默成功）；`get_background() -> tauri::ipc::Response`（前端收到 ArrayBuffer；空 = 无图）；**无 config 字段**（文件存在即生效）
 
 ### 4.4 退出登录
 
@@ -201,7 +201,7 @@
 
 ### 4.5 新命令与配置字段
 
-**bridge 新命令（9 个）**：
+**bridge 新命令（10 个）**：
 
 | 命令 | 参数 | 返回/行为 |
 |------|------|----------|
@@ -211,11 +211,12 @@
 | `set_camera_device` | `id: String`（空=系统默认） | 存 config（前端读取应用） |
 | `set_theme` | `theme: String` | 存 config |
 | `set_sound_pack` | `pack: String` | 存 config |
-| `set_background` | `path: Option<String>` | 复制/删除文件 + 存 config |
-| `get_background` | — | `Option<(bytes, mime)>` |
+| `set_background` | 原始字节体（≤10MB） | 文件头白名单校验 → 写单文件（覆盖旧图）；非白名单/超限拒绝 |
+| `clear_background` | — | 删背景文件（无图静默成功） |
+| `get_background` | — | `tauri::ipc::Response`（ArrayBuffer；空 = 无图） |
 | `logout` | — | 清凭证 + 断开 + 回登录页 |
 
-**config 新字段（6 个，均带 serde default 兼容旧配置）**：
+**config 新字段（5 个，均带 serde default 兼容旧配置；背景图无 config 字段）**：
 
 ```rust
 #[serde(default)] pub input_device: String,    // 空 = 系统默认
@@ -223,7 +224,6 @@
 #[serde(default)] pub camera_device: String,   // 空 = 系统默认
 #[serde(default = "default_theme")] pub theme: String,          // "dianlan"
 #[serde(default = "default_sound_pack")] pub sound_pack: String, // "default"
-#[serde(default)] pub background_ext: String,  // 空 = 无背景图
 ```
 
 ## 5. 错误与边界
@@ -233,7 +233,8 @@
 | 设备失效（拔出/禁用） | 启动/切换时找不到 → 回退「系统默认」+ 设置页内联提示一次 |
 | 新输出设备打开失败 | 回退默认重试；再失败上报事件并继续默认（语音不中断） |
 | 背景图超限（>10MB） | 前端拒绝并提示；Rust 侧兜底拒绝 |
-| 背景文件丢失（手动删） | 启动加载失败 → 静默无背景 + 清 config 标记 |
+| 背景图格式非白名单 | 提示仅支持 PNG / JPEG / WebP（前端提示 + Rust 拒绝） |
+| 背景文件丢失（手动删） | 读回为空 → 静默无背景（无标记可清） |
 | 音效文件缺失 | 播放静默忽略，不崩溃 |
 | 设置页打开时断线/被踢 | 关闭设置页 → 回登录页（现有流程） |
 | 未登录 | ⚙ 不可用（登录页期间隐藏） |
@@ -252,7 +253,7 @@
 
 1. 顶栏改造生效；⚙ 打开/`‹ 返回` 关闭；开合后主界面聊天/卡片状态无损
 2. 6 套主题逐套点选：底色系 + 强调色全变；重启客户端后保持
-3. 背景图：选择 → 立即铺满（侧栏+卡片+聊天）+ 可读；重启保留；换图 → 旧文件被删；清除 → 恢复纯色 + 文件被删；>10MB 被拒
+3. 背景图：选择 → 立即铺满（侧栏+卡片+聊天）+ 可读；重启保留；换图 → 直接覆盖（目录仅一个 `background.img`）；清除 → 恢复纯色 + 文件被删；>10MB 被拒；非白名单格式（如 GIF）被拒
 4. 麦克风切换：对方实际听到声音来源变化；拔出所选设备 → 回退默认 + 提示
 5. 扬声器切换：声音从新设备输出；切换瞬间语音不中断（仅一瞬静默）
 6. 摄像头：切换后开启使用新设备；运行中切换 → 自动重启（对方短暂黑屏后恢复）
@@ -267,11 +268,12 @@
 
 **客户端 Rust（`client/src-tauri/src/`）**：
 
+- `audio/device.rs`（新）：wasapi 设备枚举（DeviceInfo：id/name/is_default）与按 id 查找
 - `audio/capture.rs`：`open(device_id)` + 设备 id 支持
-- `audio/playback.rs`：`init_render(device_id)` + 外层重初始化循环 + 偏好变化检测
-- `audio/session.rs`：`SharedAudio` 增设备偏好字段；采集线程热切换逻辑；播放线程偏好传入
-- `bridge.rs`：9 个新命令 + `audio_device_fallback` 事件
-- `config.rs`：6 新字段 + 单测
+- `audio/playback.rs`：`init_render(device_id)` + 外层重初始化循环 + 偏好变化检测 + 启动回退
+- `audio/session.rs`：`SharedAudio` 增设备偏好字段；采集线程热切换与回退辅助（`open_mic`，启动/切换共用）；播放线程偏好传入
+- `bridge.rs`：10 个新命令 + `audio_device_fallback` 事件
+- `config.rs`：5 新字段 + 单测
 
 **前端（`client/ui/`）**：
 
@@ -281,7 +283,7 @@
 - `video_capture.js`：摄像头设备枚举与应用（含运行中重启）
 - `sounds/default/in.mp3`、`out.mp3`（从 ui 根挪入）
 
-**其他**：`tauri.conf.json` 0.3.0；根 `Cargo.toml` workspace 版本 0.3.0
+**其他**：`tauri.conf.json` 升 0.3.0（workspace `Cargo.toml` 保持 0.1.0 不动，与 C 做法一致）
 
 ## 8. 明确不做（YAGNI）
 
