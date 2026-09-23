@@ -361,7 +361,7 @@ pub fn spawn_audio_pipeline(
             out[filled..filled + want].copy_from_slice(&scratch[..want]);
             filled += want;
         }
-    })?;
+    }, shared.output_device.clone(), Some(bridge.clone()))?;
 
     // 监视线程：总 stop 置位后关闭播放器（PlayerHandle 由本线程持有保活）
     {

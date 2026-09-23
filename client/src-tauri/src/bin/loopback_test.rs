@@ -41,7 +41,7 @@ fn main() -> anyhow::Result<()> {
         if written < out.len() {
             out[written..].fill(0);
         }
-    })?;
+    }, std::sync::Arc::new(std::sync::Mutex::new(None)), None)?;
     println!("自听已启动，请对着麦克风说话（Ctrl+C 退出）");
 
     // 主线程 = 采集线程：按 960 样本（20ms）切块；RNNoise 降噪后推入通道

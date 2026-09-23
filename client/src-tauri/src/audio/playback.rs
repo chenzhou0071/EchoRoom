@@ -1,13 +1,17 @@
-//! WASAPI 播放：默认输出设备、48kHz i16 输出（信号单声道，双声道左右同源）、事件驱动 + 填充回调。
+//! WASAPI 播放：选定输出设备（默认或指定）、48kHz i16 输出（信号单声道，双声道左右同源）、事件驱动 + 填充回调。
+//! 设备热切换：run_player 外层重初始化循环——render_loop 检测偏好变化后主动退出，同一 fill 闭包跨设备保留全部状态。
 //! COM 必须在同一线程初始化与使用：设备对象全部在播放线程内创建并持有。
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use wasapi::{AudioRenderClient, BufferFlags, Direction, SampleType, ShareMode, WaveFormat};
 
 use echoroom_protocol::SAMPLE_RATE;
+use tauri::Emitter;
+
+use crate::bridge::Bridge;
 
 /// 输出按双声道 i16 请求：每帧 4 字节（信号仍单声道，左右同源复制）
 const OUT_BYTES_PER_FRAME: usize = 4;
@@ -30,8 +34,14 @@ impl Drop for PlayerHandle {
 }
 
 /// 启动播放线程：`fill` 回调负责填充每个播放周期的单声道样本（长度 = 本次可写帧数）。
-/// 返回前会等待设备初始化完成；初始化失败直接报错。
-pub fn spawn_player<F>(fill: F) -> Result<PlayerHandle>
+/// `output_device` 为输出设备偏好（None = 系统默认；变化即热切换）。
+/// `bridge` 用于上报设备回退事件（headless 工具传 None）。
+/// 返回前会等待设备初始化完成；首轮初始化失败直接报错。
+pub fn spawn_player<F>(
+    fill: F,
+    output_device: Arc<Mutex<Option<String>>>,
+    bridge: Option<Bridge>,
+) -> Result<PlayerHandle>
 where
     F: FnMut(&mut [i16]) + Send + 'static,
 {
@@ -39,7 +49,9 @@ where
     let stop_thread = Arc::clone(&stop);
     let (ready_tx, ready_rx) = channel::<Result<()>>();
 
-    std::thread::spawn(move || run_player(fill, &stop_thread, &ready_tx));
+    std::thread::spawn(move || {
+        run_player(fill, &stop_thread, &ready_tx, &output_device, bridge.as_ref())
+    });
 
     match ready_rx.recv() {
         Ok(Ok(())) => Ok(PlayerHandle { stop }),
@@ -48,31 +60,86 @@ where
     }
 }
 
-fn run_player<F>(mut fill: F, stop: &AtomicBool, ready: &Sender<Result<()>>)
-where
+/// 渲染循环退出控制：正常停止 / 设备偏好变化需重初始化
+enum Control {
+    Stop,
+    Restart,
+}
+
+fn run_player<F>(
+    mut fill: F,
+    stop: &AtomicBool,
+    ready: &Sender<Result<()>>,
+    output_device: &Mutex<Option<String>>,
+    bridge: Option<&Bridge>,
+) where
     F: FnMut(&mut [i16]) + Send + 'static,
 {
-    let (client, render, event) = match init_render() {
-        Ok(triple) => triple,
-        Err(e) => {
-            let _ = ready.send(Err(e));
+    let mut first = true;
+    loop {
+        if stop.load(Ordering::Relaxed) {
             return;
         }
-    };
-    let _ = ready.send(Ok(()));
-    if let Err(e) = render_loop(&mut fill, &client, &render, &event, stop) {
-        eprintln!("[audio] 播放线程异常退出: {e:#}");
+        let mut pref = output_device.lock().unwrap().clone();
+        // 打开目标设备；所选设备打不开（含启动时已失效）→ 清偏好 + 上报事件 + 回退系统默认
+        let mut init = init_render(pref.as_deref());
+        if pref.is_some() {
+            if let Err(e) = init.as_ref() {
+                let reason = e.to_string();
+                eprintln!("[audio] 所选输出设备不可用: {reason}，回退系统默认");
+                output_device.lock().unwrap().take(); // 运行时清空；前端据事件持久化
+                if let Some(b) = bridge {
+                    let _ = b.app.emit(
+                        "audio_device_fallback",
+                        serde_json::json!({ "direction": "output", "reason": reason }),
+                    );
+                }
+                pref = None;
+                init = init_render(None);
+            }
+        }
+        let (client, render, event) = match init {
+            Ok(triple) => triple,
+            Err(e) => {
+                if first {
+                    // 系统默认也失败：保持 spawn_player 现有语义（直接报错，线程退出）
+                    let _ = ready.send(Err(e));
+                    return;
+                }
+                // 运行期默认设备被拔（等）：等待重试（stop 在循环头检查）
+                eprintln!("[audio] 默认输出设备不可用: {e:#}，稍后重试");
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                continue;
+            }
+        };
+        if first {
+            let _ = ready.send(Ok(()));
+            first = false;
+        }
+        match render_loop(&mut fill, &client, &render, &event, stop, output_device, pref) {
+            Ok(Control::Stop) => return,
+            Ok(Control::Restart) => continue,
+            Err(e) => {
+                eprintln!("[audio] 播放线程异常退出: {e:#}");
+                return;
+            }
+        }
     }
 }
 
-/// 设备初始化：返回 (AudioClient, AudioRenderClient, 事件句柄)。
-fn init_render() -> Result<(wasapi::AudioClient, AudioRenderClient, wasapi::Handle)> {
+/// 设备初始化：按偏好打开（None = 系统默认），返回 (AudioClient, AudioRenderClient, 事件句柄)。
+fn init_render(device_id: Option<&str>) -> Result<(wasapi::AudioClient, AudioRenderClient, wasapi::Handle)> {
     wasapi::initialize_mta()
         .ok()
         .context("initialize COM (MTA)")?;
-    let device = wasapi::get_default_device(&Direction::Render)
-        .map_err(err2any)
-        .context("default render device")?;
+    let device = match device_id {
+        Some(id) => crate::audio::device::find(&Direction::Render, id)
+            .context("查找所选扬声器")?
+            .ok_or_else(|| anyhow::anyhow!("所选扬声器不存在"))?,
+        None => wasapi::get_default_device(&Direction::Render)
+            .map_err(err2any)
+            .context("default render device")?,
+    };
     let mut client = device
         .get_iaudioclient()
         .map_err(err2any)
@@ -126,11 +193,18 @@ fn render_loop<F>(
     render: &AudioRenderClient,
     event: &wasapi::Handle,
     stop: &AtomicBool,
-) -> Result<()>
+    output_device: &Mutex<Option<String>>,
+    active_pref: Option<String>,
+) -> Result<Control>
 where
     F: FnMut(&mut [i16]) + Send + 'static,
 {
     while !stop.load(Ordering::Relaxed) {
+        // 设备偏好变化 → 停流并交给外层用新设备重初始化（fill 状态全保留）
+        if output_device.lock().unwrap().clone() != active_pref {
+            client.stop_stream().map_err(err2any)?;
+            return Ok(Control::Restart);
+        }
         // 事件驱动；10ms 超时兜底轮询（事件可能不触发；也保证 stop 快速响应）
         let _ = event.wait_for_event(10);
         let avail = client.get_available_space_in_frames().map_err(err2any)? as usize;
@@ -151,5 +225,5 @@ where
             .map_err(err2any)?;
     }
     client.stop_stream().map_err(err2any)?;
-    Ok(())
+    Ok(Control::Stop)
 }
