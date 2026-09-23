@@ -8,6 +8,12 @@
   --ok: #4ade80;
   --err: #f87171;
   --border: #2a2f3a;
+  --topbar-h: 48px; /* 顶栏高度（设置页从其下方起覆盖） */
+  /* 派生色（Task 9 各主题重定义；此处为默认主题值） */
+  --accent-soft: rgba(59, 130, 246, .15);
+  --err-soft: rgba(248, 113, 113, .15);
+  --panel-hover: #262b36;
+  --panel-deep: #15181f;
   --sidebar-w: 110px; /* 左栏宽度 */
   --tile: 200px; /* 成员卡片宽度（定死）：最小窗口 768 每行 3 个，拉宽后 4/5/6 个 */
 }
@@ -27,19 +33,37 @@ body {
   user-select: none;
 }
 
-/* ---- 顶栏：标题 + 连接状态 ---- */
+/* ---- 顶栏：标题 + 连接状态 + 设置入口 ---- */
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 14px;
+  height: var(--topbar-h);
+  padding: 0 14px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.topbar .title { font-weight: 600; letter-spacing: .3px; }
+.topbar .title { font-weight: 600; font-size: 20px; letter-spacing: .5px; }
+.topbar-right { display: flex; align-items: center; gap: 10px; }
 .topbar .status { font-size: 12px; color: var(--text-dim); }
 .topbar .status.online { color: var(--ok); }
 .topbar .status.offline { color: var(--err); }
+.topbar-gear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.topbar-gear:hover { background: var(--panel-hover); color: var(--text); }
+.topbar-gear svg { width: 17px; height: 17px; }
+.topbar-gear[hidden] { display: none; }
 
 /* ---- 左栏：在线名单 ---- */
 .app-body {
@@ -588,3 +612,64 @@ video.view-canvas {
 .share-pop .sp-cam:hover { background: rgba(59, 130, 246, .28); }
 .share-pop .sp-cam.danger { background: rgba(248, 113, 113, .15); color: var(--err); }
 .share-pop .sp-cam.danger:hover { background: rgba(248, 113, 113, .28); }
+
+/* ---- D：设置页（覆盖顶栏以下整个窗口；主界面不销毁） ---- */
+.settings-page {
+  position: fixed;
+  top: var(--topbar-h);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 22; /* 盖住观看视图（20/25）；低于弹层（30） */
+  display: flex;
+  background: var(--bg);
+}
+.settings-page[hidden] { display: none; }
+.settings-nav {
+  width: 150px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 8px;
+  border-right: 1px solid var(--border);
+}
+.settings-back {
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+.settings-back:hover { background: var(--panel); color: var(--text); }
+.settings-cats { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+.settings-cat {
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+.settings-cat:hover { background: var(--panel); color: var(--text); }
+.settings-cat.active { background: var(--accent-soft); color: var(--accent); }
+.settings-cat[hidden] { display: none; } /* 功能开关关闭的分类 */
+.settings-version {
+  margin-top: auto;
+  padding: 0 10px 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.settings-body {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 18px 20px;
+}
+.settings-pane[hidden] { display: none; }
+.settings-title { font-size: 15px; font-weight: 600; margin: 0 0 14px; }

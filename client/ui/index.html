@@ -9,7 +9,10 @@
 <body>
   <header class="topbar">
     <span class="title">Echo</span>
-    <span class="status" id="conn-status">未连接</span>
+    <div class="topbar-right">
+      <span class="status" id="conn-status">未连接</span>
+      <button class="topbar-gear" id="open-settings" title="设置" hidden></button>
+    </div>
   </header>
 
   <div class="app-body">
@@ -37,6 +40,25 @@
         <input id="chat-input" type="text" placeholder="连接后即可发言…" disabled />
         <button id="chat-send" disabled>发送</button>
       </footer>
+    </div>
+  </div>
+
+  <div class="settings-page" id="settings-page" hidden>
+    <aside class="settings-nav">
+      <button class="settings-back" id="settings-back">‹ 返回</button>
+      <nav class="settings-cats">
+        <button class="settings-cat active" data-cat="account">账号</button>
+        <button class="settings-cat" data-cat="device">设备</button>
+        <button class="settings-cat" data-cat="sound">音效</button>
+        <button class="settings-cat" data-cat="appearance">外观</button>
+      </nav>
+      <div class="settings-version" id="settings-version">v0.3.0</div>
+    </aside>
+    <div class="settings-body">
+      <section class="settings-pane" data-pane="account"></section>
+      <section class="settings-pane" data-pane="device" hidden></section>
+      <section class="settings-pane" data-pane="sound" hidden></section>
+      <section class="settings-pane" data-pane="appearance" hidden></section>
     </div>
   </div>
 
@@ -68,6 +90,7 @@
     </div>
   </div>
 
+  <script src="features.js"></script>
   <script src="video_capture.js"></script>
   <script src="video_view.js"></script>
   <script src="app.js"></script>

@@ -32,10 +32,14 @@ const ICONS = {
   cam: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>',
   play: '<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>',
   avatar: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10zm0 2c-5.33 0-9 2.67-9 6v2h18v-2c0-3.33-3.67-6-9-6z"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
 };
 
 // ---- 小工具 ----
 const el = (id) => document.getElementById(id);
+
+// D：功能开关（features.js 提供；缺文件/缺项按全开）
+const FEATURES = Object.assign({ sound: true, theme: true, background: true }, window.FEATURES || {});
 
 function nowHm() {
   const d = new Date();
@@ -581,6 +585,8 @@ function setConn(status) {
   const usable = status === "connected";
   el("chat-input").disabled = !usable;
   el("chat-send").disabled = !usable;
+  el("open-settings").hidden = !usable;
+  if (!usable) closeSettings(); // 断线/被拒：设置页一并收起，交还登录/重连流程
   if (usable) el("chat-input").focus();
 }
 
@@ -753,6 +759,42 @@ el("profile-avatar-file").addEventListener("change", async (e) => {
   }
 });
 
+// ---- D：设置页（顶栏 ⚙ 覆盖式；分类切换 + 版本号） ----
+const settingsPage = el("settings-page");
+const paneRefreshers = {}; // cat → 刷新钩子（各页面任务注册：paneRefreshers.device = refreshDevices 等）
+
+function switchCat(cat) {
+  for (const btn of settingsPage.querySelectorAll(".settings-cat")) {
+    btn.classList.toggle("active", btn.dataset.cat === cat);
+  }
+  for (const pane of settingsPage.querySelectorAll(".settings-pane")) {
+    pane.hidden = pane.dataset.pane !== cat;
+  }
+  const fn = paneRefreshers[cat];
+  if (fn) fn();
+}
+
+function openSettings() {
+  settingsPage.hidden = false;
+  const active = settingsPage.querySelector(".settings-cat.active");
+  switchCat(active ? active.dataset.cat : "account");
+}
+
+function closeSettings() {
+  settingsPage.hidden = true;
+}
+
+el("open-settings").innerHTML = ICONS.gear;
+el("open-settings").addEventListener("click", openSettings);
+el("settings-back").addEventListener("click", closeSettings);
+for (const btn of settingsPage.querySelectorAll(".settings-cat")) {
+  btn.addEventListener("click", () => switchCat(btn.dataset.cat));
+}
+
+// D：功能开关——关闭的分类整个隐藏（features.js；默认全开时无副作用）
+if (!FEATURES.sound) settingsPage.querySelector('.settings-cat[data-cat="sound"]').hidden = true;
+if (!FEATURES.theme && !FEATURES.background) settingsPage.querySelector('.settings-cat[data-cat="appearance"]').hidden = true;
+
 // ---- 事件接线与启动 ----
 async function init() {
   // 先注册监听器，再发起连接：保证事件不因时序竞态丢失
@@ -906,6 +948,13 @@ async function init() {
   });
 
   const cfg = await invoke("get_config");
+  // D：设置页版本号（取打包版本；失败保留静态占位）
+  window.__TAURI__.app
+    .getVersion()
+    .then((v) => {
+      el("settings-version").textContent = "v" + v;
+    })
+    .catch(() => {});
   // 音量真值来自 Rust（config 持久化）：初始化本地副本
   volState = { self_gain: cfg.self_gain, muted: cfg.muted, peer_gains: cfg.peer_gains };
   screenGain = cfg.screen_gain ?? 1.0; // R4：投屏音量（观看端）
