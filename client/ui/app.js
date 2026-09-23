@@ -243,16 +243,37 @@ function renderOnline() {
   }
 }
 
-// ---- 音效：进入 / 退出（webview 原生 Audio；重连不重播；自己退出不播） ----
-const sndIn = new Audio("in.mp3");
-const sndOut = new Audio("out.mp3");
-sndIn.volume = 0.5;
-sndOut.volume = 0.5;
+// ---- 音效：方案注册表（进入 / 退出；重连不重播；自己退出不播） ----
+// 新增音效 = 放 client/ui/sounds/<id>/in.mp3 + out.mp3，并在 SOUND_PACKS 加一行
+const SOUND_PACKS = [{ id: "default", name: "Default" }];
+let soundPack = "default"; // 当前方案（init 从 config 读入；"none" = 关闭）
 let everEntered = false; // 本进程内是否已首次进入过房间（重连不重播）
+const packAudios = new Map(); // `${id}:${kind}` → Audio（懒建；试听与实播共用）
 
-function playSnd(audio) {
-  audio.currentTime = 0; // 连点重入时从头播，不叠音
-  audio.play().catch(() => {}); // 自动播放被策略阻止时静默忽略
+function packAudio(id, kind) {
+  const key = id + ":" + kind;
+  let a = packAudios.get(key);
+  if (!a) {
+    a = new Audio("sounds/" + id + "/" + kind + ".mp3");
+    a.volume = 0.5;
+    packAudios.set(key, a);
+  }
+  return a;
+}
+
+// 实播：member_join / member_leave / 首次进入（"none" 不播；功能开关关闭时不播）
+function playPackSnd(kind) {
+  if (!FEATURES.sound || soundPack === "none") return;
+  const a = packAudio(soundPack, kind);
+  a.currentTime = 0; // 连点重入时从头播，不叠音
+  a.play().catch(() => {}); // 文件缺失/自动播放被阻止：静默忽略
+}
+
+// 试听（不影响选中）
+function previewSound(id, kind) {
+  const a = packAudio(id, kind);
+  a.currentTime = 0;
+  a.play().catch(() => {});
 }
 
 // ---- 音量弹出面板（单例） ----
@@ -970,6 +991,58 @@ window.addEventListener("camera-device-fallback", () => {
   refreshDevices();
 });
 
+// ---- D：音效页（块状方案列表：点块=使用；两个试听按钮） ----
+function soundBlock(id, name, withButtons) {
+  const block = document.createElement("div");
+  block.className = "sound-block" + (soundPack === id ? " active" : "");
+  const head = document.createElement("div");
+  head.className = "sound-head";
+  const nm = document.createElement("span");
+  nm.className = "sound-name";
+  nm.textContent = name;
+  head.appendChild(nm);
+  if (soundPack === id) {
+    const mark = document.createElement("span");
+    mark.className = "sound-mark";
+    mark.textContent = "● 使用中";
+    head.appendChild(mark);
+  }
+  block.appendChild(head);
+  if (withButtons) {
+    const row = document.createElement("div");
+    row.className = "sound-actions";
+    for (const [kind, label] of [["in", "▶ 入场"], ["out", "▶ 离场"]]) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "sound-preview";
+      b.textContent = label;
+      b.addEventListener("click", (e) => {
+        e.stopPropagation(); // 试听不影响选中
+        previewSound(id, kind);
+      });
+      row.appendChild(b);
+    }
+    block.appendChild(row);
+  }
+  block.addEventListener("click", () => selectSoundPack(id));
+  return block;
+}
+
+async function selectSoundPack(id) {
+  if (soundPack === id) return;
+  soundPack = id;
+  buildSoundPane(); // 立即反映选中态（持久化失败也保持本次选择）
+  await invoke("set_sound_pack", { pack: id }).catch((e) => console.warn(e));
+}
+
+function buildSoundPane() {
+  const list = el("sound-list");
+  list.replaceChildren();
+  for (const pack of SOUND_PACKS) list.appendChild(soundBlock(pack.id, pack.name, true));
+  list.appendChild(soundBlock("none", "关闭（无提示音）", false)); // 固定末尾：关闭块无试听按钮
+}
+paneRefreshers.sound = buildSoundPane;
+
 // ---- 事件接线与启动 ----
 async function init() {
   // 先注册监听器，再发起连接：保证事件不因时序竞态丢失
@@ -990,7 +1063,7 @@ async function init() {
     renderOnline();
     if (!everEntered) {
       everEntered = true;
-      playSnd(sndIn); // 自己首次进入；之后的重连同步不播
+      playPackSnd("in"); // 自己首次进入；之后的重连同步不播
     }
   });
   await listen("member_join", (e) => {
@@ -998,7 +1071,7 @@ async function init() {
     members.set(uid, { nickname, speaking: false, muted: false, streams: 0, hasAvatar });
     renderMembers();
     renderOnline();
-    playSnd(sndIn); // 别人进入
+    playPackSnd("in"); // 别人进入
   });
   await listen("member_leave", (e) => {
     const uid = e.payload;
@@ -1010,7 +1083,7 @@ async function init() {
     members.delete(uid);
     renderMembers();
     renderOnline();
-    playSnd(sndOut); // 别人退出（自己退出不播：本客户端不会收到自己的 leave 广播）
+    playPackSnd("out"); // 别人退出（自己退出不播：本客户端不会收到自己的 leave 广播）
   });
   await listen("chat", (e) => appendMessage(e.payload.uid, e.payload.text));
   await listen("speaking", (e) => {
@@ -1149,6 +1222,7 @@ async function init() {
   shareQuality = cfg.share_quality || "720p30";
   videoCapture.setQuality(shareQuality);
   videoCapture.setCameraDevice(cfg.camera_device || ""); // D：摄像头设备（空 = 系统默认）
+  soundPack = cfg.sound_pack || "default"; // D：音效方案（"none" = 关闭）
   shareAudioOn = cfg.share_audio !== false;
   screenAudioOk = await invoke("screen_audio_supported").catch(() => false);
   applyShareAudioUi();

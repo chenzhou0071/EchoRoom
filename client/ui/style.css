@@ -722,3 +722,29 @@ video.view-canvas {
 }
 .settings-select:focus { outline: none; border-color: var(--accent); }
 .settings-hint { margin-top: 10px; font-size: 12px; color: var(--err); }
+
+/* ---- D：音效页 ---- */
+.sound-list { display: flex; flex-direction: column; gap: 10px; max-width: 420px; }
+.sound-block {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  cursor: pointer;
+}
+.sound-block:hover { background: var(--panel-hover); }
+.sound-block.active { border-color: var(--accent); }
+.sound-head { display: flex; align-items: center; justify-content: space-between; }
+.sound-name { font-size: 13px; color: var(--text); }
+.sound-mark { font-size: 12px; color: var(--accent); }
+.sound-actions { display: flex; gap: 8px; margin-top: 10px; }
+.sound-preview {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+.sound-preview:hover { border-color: var(--accent); color: var(--text); }
