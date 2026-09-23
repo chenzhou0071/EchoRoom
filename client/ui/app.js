@@ -1083,12 +1083,95 @@ function buildThemePane() {
 }
 
 function buildAppearancePane() {
-  if (FEATURES.theme) buildThemePane(); // 功能开关：主题关闭则不构建
+  if (FEATURES.theme) buildThemePane();
+  if (FEATURES.background) refreshBackground();
 }
 paneRefreshers.appearance = buildAppearancePane;
 
 // D：功能开关——主题关闭则整区隐藏（features.js）
 if (!FEATURES.theme) el("theme-section").hidden = true;
+
+// ---- D：外观页·背景图（Rust 单文件 background.img；文件存在即生效） ----
+let bgUrl = null; // 当前背景图 Blob URL（换图/清除时 revoke）
+
+function sniffImageMime(u8) {
+  if (u8.length >= 8 && u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47) {
+    return "image/png";
+  }
+  if (u8.length >= 3 && u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (u8.length >= 12 && u8[8] === 0x57 && u8[9] === 0x45 && u8[10] === 0x42 && u8[11] === 0x50) {
+    return "image/webp";
+  }
+  return "";
+}
+
+function applyBackgroundBytes(u8, mime) {
+  if (bgUrl) URL.revokeObjectURL(bgUrl);
+  bgUrl = URL.createObjectURL(new Blob([u8], { type: mime }));
+  document.body.style.setProperty("--bg-image", 'url("' + bgUrl + '")');
+  const preview = el("bg-preview");
+  const img = document.createElement("img");
+  img.src = bgUrl;
+  img.draggable = false;
+  preview.replaceChildren(img);
+  preview.hidden = false;
+}
+
+function clearBackgroundUi() {
+  if (bgUrl) URL.revokeObjectURL(bgUrl);
+  bgUrl = null;
+  document.body.style.removeProperty("--bg-image");
+  el("bg-preview").replaceChildren();
+  el("bg-preview").hidden = true;
+}
+
+function showBgHint(msg) {
+  const node = el("bg-hint");
+  node.textContent = msg;
+  node.hidden = !msg;
+}
+
+async function refreshBackground() {
+  const buf = await invoke("get_background").catch(() => null);
+  const u8 = buf && buf.byteLength ? new Uint8Array(buf) : new Uint8Array(0);
+  const mime = u8.length ? sniffImageMime(u8) : "";
+  if (!mime) {
+    clearBackgroundUi(); // 无图/非法残留：纯色兜底
+    return;
+  }
+  applyBackgroundBytes(u8, mime);
+}
+
+el("bg-pick").addEventListener("click", () => el("bg-file").click());
+el("bg-file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = ""; // 允许重复选择同一文件
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) {
+    showBgHint("图片过大（上限 10MB）");
+    return;
+  }
+  try {
+    const u8 = new Uint8Array(await file.arrayBuffer());
+    await invoke("set_background", u8.buffer); // 原始字节体（与 send_video_frame 同通道）
+    showBgHint("");
+  } catch (err) {
+    showBgHint(String(err && err.message ? err.message : err)); // 非白名单格式等
+    return;
+  }
+  refreshBackground(); // 读回校验后的真实存储 → 铺层 + 缩略图（覆盖=旧图已删）
+});
+
+el("bg-clear").addEventListener("click", async () => {
+  await invoke("clear_background").catch(() => {});
+  clearBackgroundUi();
+  showBgHint("");
+});
+
+// D：功能开关——背景图关闭则整区隐藏（features.js）
+if (!FEATURES.background) el("bg-section").hidden = true;
 
 // ---- 事件接线与启动 ----
 async function init() {
@@ -1273,6 +1356,7 @@ async function init() {
   videoCapture.setQuality(shareQuality);
   videoCapture.setCameraDevice(cfg.camera_device || ""); // D：摄像头设备（空 = 系统默认）
   soundPack = cfg.sound_pack || "default"; // D：音效方案（"none" = 关闭）
+  if (FEATURES.background) refreshBackground(); // D：背景图（文件存在即铺层；无图静默；功能开关关闭时不读不铺）
   shareAudioOn = cfg.share_audio !== false;
   screenAudioOk = await invoke("screen_audio_supported").catch(() => false);
   applyShareAudioUi();

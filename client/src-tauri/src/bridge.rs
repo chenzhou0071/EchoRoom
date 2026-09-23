@@ -245,6 +245,80 @@ pub fn logout(state: State<AppState>) {
     println!("[auth] 已退出登录");
 }
 
+// ---- D：背景图（文件驱动；单文件无扩展名，MIME 由文件头嗅探） ----
+
+/// 背景图上限 10MB（前端已校验；此处兜底）
+const BACKGROUND_MAX: usize = 10 * 1024 * 1024;
+
+/// 背景图文件路径（本地数据目录，与 config.json 同目录）
+fn background_path() -> std::path::PathBuf {
+    default_config_path()
+        .parent()
+        .map(|p| p.join("background.img"))
+        .unwrap_or_else(|| std::path::PathBuf::from("background.img"))
+}
+
+/// 由文件头嗅探图片 MIME：仅 PNG/JPEG/WebP；未知返回 None
+fn sniff_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
+/// 设置背景图：前端读文件后的原始字节（Tauri 原始请求体）；校验通过才写盘，直接覆盖旧图
+#[tauri::command]
+pub fn set_background(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("set_background 需要二进制参数".into());
+    };
+    if bytes.is_empty() {
+        return Err("图片内容为空".into());
+    }
+    if bytes.len() > BACKGROUND_MAX {
+        return Err("图片过大（上限 10MB）".into());
+    }
+    if sniff_mime(bytes).is_none() {
+        return Err("仅支持 PNG / JPEG / WebP 图片".into());
+    }
+    let path = background_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, bytes).map_err(|e| format!("写入背景图失败：{e}"))?;
+    println!("[bg] 背景图已更新: {} 字节", bytes.len());
+    Ok(())
+}
+
+/// 清除背景图（无图时静默成功）
+#[tauri::command]
+pub fn clear_background() -> Result<(), String> {
+    match std::fs::remove_file(background_path()) {
+        Ok(()) => {
+            println!("[bg] 背景图已清除");
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("删除背景图失败：{e}")),
+    }
+}
+
+/// 读取背景图：原始响应体（前端收到 ArrayBuffer）；空数组 = 无背景（不存在/为空/超限异常残留）
+#[tauri::command]
+pub fn get_background() -> tauri::ipc::Response {
+    let bytes = std::fs::read(background_path())
+        .ok()
+        .filter(|b| !b.is_empty() && b.len() <= BACKGROUND_MAX)
+        .unwrap_or_default();
+    tauri::ipc::Response::new(bytes)
+}
+
 /// 用（新的）配置发起连接：先起新会话，再停掉旧会话（UI 事件无感切换）。
 pub fn connect_with_app(app: &AppHandle, mode: tcp::AuthMode) {
     let bridge = Bridge { app: app.clone() };
@@ -641,7 +715,7 @@ fn open_in_browser(url: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_web_url;
+    use super::{is_web_url, sniff_mime};
 
     #[test]
     fn is_web_url_accepts_http_https_case_insensitive() {
@@ -658,5 +732,25 @@ mod tests {
         assert!(!is_web_url("ftp://example.com"));
         assert!(!is_web_url("www.bilibili.com")); // 前端补全 https:// 后才交给后端
         assert!(!is_web_url(""));
+    }
+
+    #[test]
+    fn sniff_mime_recognizes_png_jpeg_webp() {
+        assert_eq!(
+            sniff_mime(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00]),
+            Some("image/png")
+        );
+        assert_eq!(sniff_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        webp.extend_from_slice(b"WEBP");
+        assert_eq!(sniff_mime(&webp), Some("image/webp"));
+    }
+
+    #[test]
+    fn sniff_mime_rejects_unknown() {
+        assert_eq!(sniff_mime(b"GIF89a"), None);
+        assert_eq!(sniff_mime(&[]), None);
+        assert_eq!(sniff_mime(b"RIFF"), None); // 长度不足 12：不 panic
     }
 }
