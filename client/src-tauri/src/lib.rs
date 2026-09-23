@@ -13,6 +13,8 @@ pub fn run() {
         cfg.muted,
         cfg.peer_gains.clone(),
         cfg.screen_gain,
+        audio::session::device_pref(&cfg.input_device),
+        audio::session::device_pref(&cfg.output_device),
     );
     tauri::Builder::default()
         .manage(AppState {
@@ -37,6 +39,12 @@ pub fn run() {
             bridge::set_muted,
             bridge::set_peer_gain,
             bridge::set_screen_gain,
+            bridge::list_audio_devices,
+            bridge::set_input_device,
+            bridge::set_output_device,
+            bridge::set_camera_device,
+            bridge::set_theme,
+            bridge::set_sound_pack,
             bridge::subscribe,
             bridge::report_stream,
             bridge::request_keyframe,

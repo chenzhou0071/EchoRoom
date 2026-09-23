@@ -299,6 +299,53 @@ pub fn set_screen_gain(state: State<AppState>, gain: f32) {
     persist(&state);
 }
 
+/// 枚举音频输入/输出设备（wasapi；含系统默认标记）
+#[tauri::command]
+pub fn list_audio_devices() -> Result<serde_json::Value, String> {
+    let inputs = crate::audio::device::list(&wasapi::Direction::Capture).map_err(|e| e.to_string())?;
+    let outputs = crate::audio::device::list(&wasapi::Direction::Render).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "inputs": inputs, "outputs": outputs }))
+}
+
+/// 选择麦克风（空 = 系统默认）：写运行时偏好（采集线程下一轮热切换）+ 持久化
+#[tauri::command]
+pub fn set_input_device(state: State<AppState>, id: String) {
+    use crate::audio::session::device_pref;
+    *state.shared.input_device.lock().unwrap() = device_pref(&id);
+    state.config.lock().unwrap().input_device = id.trim().to_string();
+    persist(&state);
+}
+
+/// 选择扬声器（空 = 系统默认）：写运行时偏好（播放线程下一轮热切换）+ 持久化
+#[tauri::command]
+pub fn set_output_device(state: State<AppState>, id: String) {
+    use crate::audio::session::device_pref;
+    *state.shared.output_device.lock().unwrap() = device_pref(&id);
+    state.config.lock().unwrap().output_device = id.trim().to_string();
+    persist(&state);
+}
+
+/// 选择摄像头（空 = 系统默认）：仅持久化（前端读取后应用于 getUserMedia）
+#[tauri::command]
+pub fn set_camera_device(state: State<AppState>, id: String) {
+    state.config.lock().unwrap().camera_device = id.trim().to_string();
+    persist(&state);
+}
+
+/// 选择主题（id 由前端校验回退；仅持久化——前端读 config 应用）
+#[tauri::command]
+pub fn set_theme(state: State<AppState>, theme: String) {
+    state.config.lock().unwrap().theme = theme;
+    persist(&state);
+}
+
+/// 选择音效方案（"default" / "none" / 未来 id；仅持久化——播放端读共享状态）
+#[tauri::command]
+pub fn set_sound_pack(state: State<AppState>, pack: String) {
+    state.config.lock().unwrap().sound_pack = pack;
+    persist(&state);
+}
+
 /// 登录成功后：停旧音频管线，按新 uid/token/服务器地址启动（失败不影响文字聊天）。
 /// `tcp_tx` 供采集线程上报说话状态（VAD）。
 pub fn start_audio(

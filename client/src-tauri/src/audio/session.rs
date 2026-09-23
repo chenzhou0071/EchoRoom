@@ -32,6 +32,20 @@ pub struct SharedAudio {
     pub my_streams: Arc<AtomicU8>,
     /// 当前订阅人数（屏幕音频推流门控；LoginOk 归零）
     pub viewer_count: Arc<AtomicU16>,
+    /// 输入设备偏好（None = 系统默认；bridge 写、采集线程读）
+    pub input_device: Arc<std::sync::Mutex<Option<String>>>,
+    /// 输出设备偏好（None = 系统默认；bridge 写、播放线程读）
+    pub output_device: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+/// config 的设备字符串 → 运行时偏好（空/空白 = 系统默认 = None）
+pub fn device_pref(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
 }
 
 impl SharedAudio {
@@ -40,6 +54,8 @@ impl SharedAudio {
         muted: bool,
         peer_gains: HashMap<String, f32>,
         screen_gain: f32,
+        input_device: Option<String>,
+        output_device: Option<String>,
     ) -> Self {
         SharedAudio {
             self_gain: Arc::new(AtomicU32::new(self_gain.to_bits())),
@@ -49,6 +65,8 @@ impl SharedAudio {
             uid_names: Arc::new(std::sync::Mutex::new(HashMap::new())),
             my_streams: Arc::new(AtomicU8::new(0)),
             viewer_count: Arc::new(AtomicU16::new(0)),
+            input_device: Arc::new(std::sync::Mutex::new(input_device)),
+            output_device: Arc::new(std::sync::Mutex::new(output_device)),
         }
     }
 }
@@ -365,5 +383,12 @@ mod tests {
         // 解除静音：补报 VAD 当前状态（可能在静音期间已翻转为说话）
         assert_eq!(speaking_report(None, false, true, true), Some(true));
         assert_eq!(speaking_report(None, false, true, false), Some(false));
+    }
+
+    #[test]
+    fn device_pref_maps_empty_to_none() {
+        assert_eq!(device_pref(""), None);
+        assert_eq!(device_pref("   "), None);
+        assert_eq!(device_pref("id-1"), Some("id-1".to_string()));
     }
 }
