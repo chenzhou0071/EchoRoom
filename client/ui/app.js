@@ -667,10 +667,11 @@ function showProfileError(msg) {
   node.textContent = msg;
 }
 
-function openProfilePop(defaultName) {
+function openProfilePop(defaultName, fromSettings = false) {
   showProfileError("");
   pendingAvatar = null;
   el("profile-nickname").value = defaultName || "";
+  el("profile-skip").textContent = fromSettings ? "取消" : "以后再说";
   // 头像预览：优先已缓存的当前头像，否则剪影
   const preview = el("profile-avatar-preview");
   const cached = myUid != null ? avatarCache.get(myUid) : null;
@@ -794,6 +795,89 @@ for (const btn of settingsPage.querySelectorAll(".settings-cat")) {
 // D：功能开关——关闭的分类整个隐藏（features.js；默认全开时无副作用）
 if (!FEATURES.sound) settingsPage.querySelector('.settings-cat[data-cat="sound"]').hidden = true;
 if (!FEATURES.theme && !FEATURES.background) settingsPage.querySelector('.settings-cat[data-cat="appearance"]').hidden = true;
+
+// ---- D：账号页（头像/昵称/账号只读 + 修改资料 + 退出登录） ----
+async function renderAccountPane() {
+  const cfg = await invoke("get_config").catch(() => null);
+  el("account-name").textContent = "账号：" + (cfg && cfg.account ? cfg.account : "—");
+  const me = myUid != null ? members.get(myUid) : null;
+  el("account-nick").textContent = me ? me.nickname : "—";
+  const preview = el("account-avatar");
+  const cached = myUid != null ? avatarCache.get(myUid) : null;
+  if (cached) {
+    const img = document.createElement("img");
+    img.className = "member-avatar-img";
+    img.src = cached;
+    img.draggable = false;
+    preview.replaceChildren(img);
+  } else {
+    preview.innerHTML = ICONS.avatar;
+  }
+}
+paneRefreshers.account = renderAccountPane;
+
+/// 账号 pane 正显示时刷新（profile_changed / avatar_data 事件里调用）
+function renderAccountIfActive() {
+  const active = settingsPage.querySelector(".settings-cat.active");
+  if (active && active.dataset.cat === "account") renderAccountPane();
+}
+
+el("account-profile").addEventListener("click", () => {
+  const me = myUid != null ? members.get(myUid) : null;
+  openProfilePop(me ? me.nickname : "", true); // 设置页入口：skip 显示「取消」
+});
+
+// 两段式登出：点一次变「确认退出？」，再点执行；3 秒未动恢复
+let logoutArmed = false;
+let logoutTimer = 0;
+
+el("account-logout").addEventListener("click", () => {
+  const btn = el("account-logout");
+  if (!logoutArmed) {
+    logoutArmed = true;
+    btn.textContent = "确认退出？";
+    clearTimeout(logoutTimer);
+    logoutTimer = setTimeout(() => {
+      logoutArmed = false;
+      btn.textContent = "退出登录";
+    }, 3000);
+    return;
+  }
+  clearTimeout(logoutTimer);
+  doLogout();
+});
+
+async function doLogout() {
+  const btn = el("account-logout");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    // 先停两路采集（仍在线：report_stream off / set_share_active false 能送达服务器）
+    await Promise.all([
+      videoCapture.stop(videoCapture.STREAM_SCREEN),
+      videoCapture.stop(videoCapture.STREAM_CAMERA),
+    ]);
+    window.videoView?.end?.();
+    await invoke("logout");
+  } catch (e) {
+    console.error("退出登录失败:", e);
+  }
+  // 本地状态清理并回登录页（服务器侧已随断线广播自己离开）
+  for (const url of avatarCache.values()) if (url) URL.revokeObjectURL(url);
+  avatarCache.clear();
+  avatarPending.clear();
+  members.clear();
+  myUid = null;
+  everEntered = false; // 下次登录重新播放入场音效
+  renderMembers();
+  renderOnline();
+  el("chat").replaceChildren(); // 清空公屏
+  setConn("未连接"); // 输入禁用 + ⚙ 隐藏（同时收起设置页）
+  showAuthPanel("login");
+  btn.disabled = false;
+  btn.textContent = "退出登录";
+  logoutArmed = false;
+}
 
 // ---- 事件接线与启动 ----
 async function init() {
@@ -926,6 +1010,8 @@ async function init() {
     renderOnline();
     forceRequestAvatar(uid); // 头像可能同期更新：绕过 has_avatar 快捷路径强制重拉
     if (profileSubmitting && uid === myUid) closeProfilePop(); // 自己保存成功：广播回来才关窗
+    // D：设置页账号 pane 正打开 → 同步刷新昵称（头像随后由 avatar_data 刷新）
+    if (uid === myUid && !settingsPage.hidden) renderAccountIfActive();
   });
   await listen("profile_error", (e) => {
     if (!profileSubmitting) return;
@@ -945,6 +1031,8 @@ async function init() {
       avatarCache.set(uid, null); // 确认无头像
     }
     renderMembers();
+    // D：设置页账号 pane 正打开 → 同步刷新头像（自己换头像后立即可见）
+    if (uid === myUid && !settingsPage.hidden) renderAccountIfActive();
   });
 
   const cfg = await invoke("get_config");

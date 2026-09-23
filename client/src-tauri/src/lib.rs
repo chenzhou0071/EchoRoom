@@ -45,6 +45,7 @@ pub fn run() {
             bridge::set_camera_device,
             bridge::set_theme,
             bridge::set_sound_pack,
+            bridge::logout,
             bridge::subscribe,
             bridge::report_stream,
             bridge::request_keyframe,

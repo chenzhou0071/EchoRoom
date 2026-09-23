@@ -55,7 +55,19 @@
       <div class="settings-version" id="settings-version">v0.3.0</div>
     </aside>
     <div class="settings-body">
-      <section class="settings-pane" data-pane="account"></section>
+      <section class="settings-pane" data-pane="account">
+        <h2 class="settings-title">账号</h2>
+        <div class="account-row">
+          <div class="account-avatar" id="account-avatar"></div>
+          <div class="account-info">
+            <div class="account-nick" id="account-nick">—</div>
+            <div class="account-name" id="account-name">—</div>
+          </div>
+        </div>
+        <button class="settings-btn" id="account-profile">修改资料</button>
+        <div class="settings-divider"></div>
+        <button class="settings-btn danger" id="account-logout">退出登录</button>
+      </section>
       <section class="settings-pane" data-pane="device" hidden></section>
       <section class="settings-pane" data-pane="sound" hidden></section>
       <section class="settings-pane" data-pane="appearance" hidden></section>
@@ -77,7 +89,7 @@
 
   <div class="setup-mask hidden" id="profile-mask">
     <div class="setup-panel">
-      <h2>完善资料</h2>
+      <h2>个人资料</h2>
       <div class="profile-avatar-row">
         <div class="profile-avatar-preview" id="profile-avatar-preview"></div>
         <button class="setup-link" id="profile-avatar-pick" type="button">选择图片</button>

@@ -218,6 +218,33 @@ pub fn avatar_request(state: State<AppState>, uid: u16) -> Result<(), String> {
     h.tx.send(NetCmd::AvatarRequest(uid)).map_err(|e| e.to_string())
 }
 
+/// 退出登录：清凭证 → 停音频管线 → 停视频会话 → 断 TCP（服务器按正常断开广播 leave）。
+/// 前端在命令返回后清理本地 UI 状态并回登录页；`account` 保留在 config 供预填。
+#[tauri::command]
+pub fn logout(state: State<AppState>) {
+    use std::sync::atomic::Ordering;
+    // 1) 清凭证：下次启动不再自动登录
+    state.config.lock().unwrap().auth_token.clear();
+    persist(&state);
+    // 2) 停音频管线（Drop 关闭采集/播放/编解码线程）
+    if let Some(h) = state.audio.lock().unwrap().take() {
+        h.stop.store(true, Ordering::Relaxed);
+    }
+    // 3) 视频会话清零：投屏采集 / 观看线程 / 提示条隐藏器（Drop 即停止）
+    state.sharing.store(false, Ordering::Relaxed);
+    *state.screen_cap.lock().unwrap() = None;
+    if let Some(stop) = state.watching.lock().unwrap().take() {
+        stop.store(true, Ordering::Relaxed);
+    }
+    *state.indicator.lock().unwrap() = None;
+    state.shared.my_streams.store(0, Ordering::Relaxed);
+    // 4) 断开连接：网络线程正常收尾（Shutdown → 不重连、不发 conn 事件）
+    if let Some(h) = state.net.lock().unwrap().take() {
+        let _ = h.tx.send(NetCmd::Shutdown);
+    }
+    println!("[auth] 已退出登录");
+}
+
 /// 用（新的）配置发起连接：先起新会话，再停掉旧会话（UI 事件无感切换）。
 pub fn connect_with_app(app: &AppHandle, mode: tcp::AuthMode) {
     let bridge = Bridge { app: app.clone() };
