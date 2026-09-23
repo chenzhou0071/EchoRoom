@@ -14,6 +14,13 @@
 //! - 匹配放宽：`Chrome_WidgetWin*` +（置顶 或 无重定向位）任一命中；标题含"正在共享"兜底；
 //! - SW_HIDE 后复查可见性，未生效会如实记录；
 //! - 每次投屏会话把窗口枚举明细写入 `%APPDATA%\com.echoroom.dev\indicator.log`。
+//!
+//! R11（2026-09-24）修复误伤：R10 放宽的「置顶 或 无重定向」把两类弹窗一并 SW_HIDE——
+//! ① 设置页 `<select>` 下拉弹层（Chrome_WidgetWin_1, WS_EX_NOACTIVATE|WS_EX_NOREDIRECTIONBITMAP,
+//!    388×…, 空标题）→ 用户表现为"投屏中设备下拉按下瞬间收起"（indicator.log 实锤 26 次）；
+//! ② 336×180 工具窗（空标题，实测仅出现在摄像头授权测试期，疑似授权气泡）
+//!    → 对应早前"投屏中开摄像头授权框出现即消失"。
+//! 恢复双重签名「置顶 **且** 无重定向」（实测提示条恒为 0x00200008），标题兜底保留。
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -231,9 +238,11 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     TRUE
 }
 
-/// 提示条匹配（R10 放宽）：
-/// ① 原验证签名（Chrome_WidgetWin_1 + 置顶 + 无重定向位）放宽为「前置顶或无重定向」任一；
-/// ② 标题含"正在共享"/"is sharing"兜底（防类名/样式随 WebView2 版本变化）；
+/// 提示条匹配（R11 恢复双重签名）：
+/// ① 类名 Chrome_WidgetWin* + 「置顶 **且** 无重定向位」——R10 曾放宽为「任一」，
+///    导致 <select> 下拉弹层 / 授权气泡（同为无重定向位但非置顶）被一并误隐藏；
+/// ② 标题含"正在共享"/"is sharing"兜底（防类名/样式随 WebView2 版本变化；
+///    下拉弹层与气泡标题恒为空串，不会被兜底误伤）；
 /// DevTools 永远排除。
 fn should_hide(class: &str, title: &str, ex: u32) -> bool {
     if title.contains("DevTools") {
@@ -241,7 +250,7 @@ fn should_hide(class: &str, title: &str, ex: u32) -> bool {
     }
     let topmost = ex & WS_EX_TOPMOST.0 != 0;
     let no_redir = ex & WS_EX_NOREDIRECTIONBITMAP.0 != 0;
-    if class.starts_with("Chrome_WidgetWin") && (topmost || no_redir) {
+    if class.starts_with("Chrome_WidgetWin") && topmost && no_redir {
         return true;
     }
     title.contains("正在共享") || title.to_lowercase().contains("is sharing")
@@ -295,4 +304,58 @@ fn webview_tree_pids() -> windows::core::Result<Vec<u32>> {
     }
     pids.sort_unstable(); // 顺序稳定，日志可比对
     Ok(pids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_hide;
+
+    /// 实测 ex 风格（indicator.log 投屏会话）：
+    /// 提示条 = TOPMOST | NOREDIRECTIONBITMAP；
+    /// <select> 下拉弹层 = NOACTIVATE | NOREDIRECTIONBITMAP；
+    /// 授权/提示气泡 = TOOLWINDOW | NOREDIRECTIONBITMAP
+    const BAR_EX: u32 = 0x0020_0008;
+    const SELECT_POPUP_EX: u32 = 0x0820_0000;
+    const TOOL_BUBBLE_EX: u32 = 0x0020_0080;
+
+    #[test]
+    fn hides_share_bar() {
+        // 真身：440×74，标题含地址与"正在共享"
+        assert!(should_hide(
+            "Chrome_WidgetWin_1",
+            "http://tauri.localhost 正在共享你的屏幕。",
+            BAR_EX
+        ));
+    }
+
+    #[test]
+    fn keeps_select_popup() {
+        // R11 回归：设置页 <select> 下拉弹层（388×…，空标题）曾被一并 SW_HIDE → 必须放行
+        assert!(!should_hide("Chrome_WidgetWin_1", "", SELECT_POPUP_EX));
+    }
+
+    #[test]
+    fn keeps_tool_bubble() {
+        // 336×180 工具窗（无置顶，疑似授权气泡）：无置顶 → 不再是隐藏目标
+        assert!(!should_hide("Chrome_WidgetWin_1", "", TOOL_BUBBLE_EX));
+    }
+
+    #[test]
+    fn keeps_devtools() {
+        assert!(!should_hide("Chrome_WidgetWin_1", "DevTools - 设备", BAR_EX));
+    }
+
+    #[test]
+    fn keeps_non_widget_windows() {
+        // 非 Chrome_WidgetWin*（如浏览器消息窗）且标题为空 → 不隐藏
+        assert!(!should_hide("Chrome_MessageWindow", "", BAR_EX));
+    }
+
+    #[test]
+    fn title_fallback_hides_unknown_variants() {
+        // 类名/样式随 WebView2 版本变化时的兜底（下拉弹层/气泡标题恒为空，不受影响）
+        assert!(should_hide("SomeFutureClass", "正在共享你的屏幕。", 0));
+        assert!(should_hide("SomeFutureClass", "is sharing your screen", 0));
+        assert!(!should_hide("SomeFutureClass", "", 0));
+    }
 }
