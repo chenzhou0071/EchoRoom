@@ -879,6 +879,97 @@ async function doLogout() {
   logoutArmed = false;
 }
 
+// ---- D：设备页（麦克风/扬声器/摄像头；选择立即生效 + 失效回退提示） ----
+let devicesFreshAt = 0; // 最近一次枚举时间（pointerdown 防抖：3 秒内不重复枚举）
+let deviceHintTimer = 0;
+
+function showDeviceHint(msg) {
+  const node = el("device-hint");
+  node.textContent = msg;
+  node.hidden = !msg;
+  clearTimeout(deviceHintTimer);
+  if (msg) {
+    deviceHintTimer = setTimeout(() => {
+      node.hidden = true;
+    }, 6000);
+  }
+}
+
+/// 用设备列表重建下拉；current 不在列表中 → 落到「系统默认」显示（回退由事件路径持久化）
+function fillDeviceSelect(sel, devices, current, defaultLabel) {
+  sel.replaceChildren();
+  const def = document.createElement("option");
+  def.value = "";
+  def.textContent = defaultLabel;
+  sel.appendChild(def);
+  for (const d of devices) {
+    const o = document.createElement("option");
+    o.value = d.id;
+    o.textContent = d.is_default ? d.name + "（系统默认）" : d.name;
+    sel.appendChild(o);
+  }
+  sel.value = current;
+  if (sel.value !== current) sel.value = ""; // 设定值不在列表中：落到系统默认
+}
+
+async function refreshDevices() {
+  devicesFreshAt = Date.now();
+  // 1) 音频设备（wasapi 枚举，Rust 侧；含 is_default 标记）
+  let audio = { inputs: [], outputs: [] };
+  try {
+    audio = await invoke("list_audio_devices");
+  } catch (e) {
+    console.warn("音频设备枚举失败:", e);
+  }
+  const cfg = await invoke("get_config").catch(() => null);
+  fillDeviceSelect(el("dev-input"), audio.inputs, cfg ? cfg.input_device : "", "系统默认");
+  fillDeviceSelect(el("dev-output"), audio.outputs, cfg ? cfg.output_device : "", "系统默认");
+  // 2) 摄像头（浏览器 enumerateDevices；未授权过 label 为空 → 显示序号）
+  let cams = [];
+  try {
+    const all = await navigator.mediaDevices.enumerateDevices();
+    cams = all
+      .filter((d) => d.kind === "videoinput")
+      .map((d, i) => ({ id: d.deviceId, name: d.label || "摄像头 " + (i + 1) }));
+  } catch (e) {
+    console.warn("摄像头枚举失败:", e);
+  }
+  let camPref = cfg ? cfg.camera_device : "";
+  if (camPref && !cams.some((c) => c.id === camPref)) camPref = ""; // 无法匹配：显示系统默认
+  fillDeviceSelect(el("dev-camera"), cams, camPref, "系统默认");
+}
+paneRefreshers.device = refreshDevices;
+
+el("dev-input").addEventListener("change", () => {
+  invoke("set_input_device", { id: el("dev-input").value }).catch((e) => console.warn(e));
+});
+el("dev-output").addEventListener("change", () => {
+  invoke("set_output_device", { id: el("dev-output").value }).catch((e) => console.warn(e));
+});
+el("dev-camera").addEventListener("change", async () => {
+  const id = el("dev-camera").value;
+  await invoke("set_camera_device", { id }).catch((e) => console.warn(e));
+  videoCapture.setCameraDevice(id);
+  if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) {
+    await videoCapture.restartCamera(); // 运行中：自动重启（失效回退在 startCamera 内部）
+    renderMembers(); // 卡片摄像头按钮态跟随
+  }
+  refreshDevices(); // 回退/切换后同步下拉显示
+});
+
+// 展开下拉前刷新（pointerdown 先于原生下拉展开；3 秒防抖避免高频枚举）
+for (const id of ["dev-input", "dev-output", "dev-camera"]) {
+  el(id).addEventListener("pointerdown", () => {
+    if (Date.now() - devicesFreshAt > 3000) refreshDevices();
+  });
+}
+
+// 摄像头失效回退（video_capture.js 派发）：提示 + 刷新下拉（偏好已由该模块清空持久化）
+window.addEventListener("camera-device-fallback", () => {
+  showDeviceHint("所选摄像头不可用，已回退系统默认");
+  refreshDevices();
+});
+
 // ---- 事件接线与启动 ----
 async function init() {
   // 先注册监听器，再发起连接：保证事件不因时序竞态丢失
@@ -1035,6 +1126,14 @@ async function init() {
     if (uid === myUid && !settingsPage.hidden) renderAccountIfActive();
   });
 
+  // D：音频设备回退（采集/播放线程）→ 清持久化偏好 + 刷新下拉 + 内联提示
+  await listen("audio_device_fallback", (e) => {
+    const { direction, reason } = e.payload;
+    invoke(direction === "input" ? "set_input_device" : "set_output_device", { id: "" }).catch(() => {});
+    showDeviceHint((direction === "input" ? "麦克风" : "扬声器") + "不可用，已回退系统默认（" + reason + "）");
+    refreshDevices();
+  });
+
   const cfg = await invoke("get_config");
   // D：设置页版本号（取打包版本；失败保留静态占位）
   window.__TAURI__.app
@@ -1049,6 +1148,7 @@ async function init() {
   // B：投屏配置（档位应用给采集模块；声音开关/平台能力供面板显示）
   shareQuality = cfg.share_quality || "720p30";
   videoCapture.setQuality(shareQuality);
+  videoCapture.setCameraDevice(cfg.camera_device || ""); // D：摄像头设备（空 = 系统默认）
   shareAudioOn = cfg.share_audio !== false;
   screenAudioOk = await invoke("screen_audio_supported").catch(() => false);
   applyShareAudioUi();

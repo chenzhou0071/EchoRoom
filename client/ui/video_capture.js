@@ -143,19 +143,53 @@ window.videoCapture = (() => {
     await invoke("set_share_active", { active: true }).catch(() => {});
   }
 
-  async function startCamera() {
-    if (sessions.has(STREAM_CAMERA)) return;
-    let stream;
+  // D：摄像头设备（空 = 系统默认）。deviceId 由设置页写入；不匹配（设备拔出）→ 清偏好回退默认。
+  let cameraDeviceId = "";
+
+  function setCameraDevice(id) {
+    cameraDeviceId = id || "";
+  }
+
+  /// 按 deviceId 打开摄像头流；失败返回 null（不抛）。
+  /// exact 约束：选中设备必须命中——命中不了说明已失效，交由 startCamera 回退。
+  async function tryGetCamera(deviceId) {
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+      return await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30 },
+          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        },
       });
     } catch (e) {
-      console.warn("[video] 摄像头开启失败/被拒:", e.message);
-      return;
+      console.warn("[video] 摄像头开启失败:", e.message);
+      return null;
     }
+  }
+
+  /// 返回 true = 摄像头流已就绪
+  async function startCamera() {
+    if (sessions.has(STREAM_CAMERA)) return true;
+    let stream = await tryGetCamera(cameraDeviceId);
+    if (!stream && cameraDeviceId) {
+      // 所选设备打不开（拔出/被占用）：清偏好（持久化）→ 回退系统默认 → 通知 UI
+      console.warn("[video] 所选摄像头不可用，回退系统默认");
+      cameraDeviceId = "";
+      await invoke("set_camera_device", { id: "" }).catch(() => {});
+      window.dispatchEvent(new CustomEvent("camera-device-fallback"));
+      stream = await tryGetCamera("");
+    }
+    if (!stream) return false;
     await startPipeline(STREAM_CAMERA, stream);
     await invoke("report_stream", { kind: STREAM_CAMERA, on: true }).catch(() => {});
+    return true;
+  }
+
+  /// D：运行中切换摄像头——停→开（观众端短暂中断后由新流 IDR 恢复）；返回是否恢复成功
+  async function restartCamera() {
+    await stop(STREAM_CAMERA);
+    return startCamera();
   }
 
   // R4：切换投屏源——重开系统选择器选择新窗口/应用；新流就位后原子替换会话。
@@ -234,6 +268,8 @@ window.videoCapture = (() => {
     STREAM_CAMERA,
     startScreen,
     startCamera,
+    setCameraDevice,
+    restartCamera,
     switchScreen,
     stop,
     setQuality,

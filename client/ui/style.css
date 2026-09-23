@@ -706,3 +706,19 @@ video.view-canvas {
 .settings-btn.danger { color: var(--err); border-color: var(--err-soft); }
 .settings-btn:disabled { opacity: .5; cursor: default; }
 .settings-divider { height: 1px; background: var(--border); margin: 14px 0; }
+
+/* ---- D：设备页 ---- */
+.settings-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; max-width: 460px; }
+.settings-label { width: 60px; flex-shrink: 0; font-size: 13px; color: var(--text-dim); }
+.settings-select {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+}
+.settings-select:focus { outline: none; border-color: var(--accent); }
+.settings-hint { margin-top: 10px; font-size: 12px; color: var(--err); }

@@ -68,7 +68,22 @@
         <div class="settings-divider"></div>
         <button class="settings-btn danger" id="account-logout">退出登录</button>
       </section>
-      <section class="settings-pane" data-pane="device" hidden></section>
+      <section class="settings-pane" data-pane="device" hidden>
+        <h2 class="settings-title">设备</h2>
+        <div class="settings-row">
+          <label class="settings-label" for="dev-input">麦克风</label>
+          <select class="settings-select" id="dev-input"></select>
+        </div>
+        <div class="settings-row">
+          <label class="settings-label" for="dev-output">扬声器</label>
+          <select class="settings-select" id="dev-output"></select>
+        </div>
+        <div class="settings-row">
+          <label class="settings-label" for="dev-camera">摄像头</label>
+          <select class="settings-select" id="dev-camera"></select>
+        </div>
+        <div class="settings-hint" id="device-hint" hidden></div>
+      </section>
       <section class="settings-pane" data-pane="sound" hidden></section>
       <section class="settings-pane" data-pane="appearance" hidden></section>
     </div>
