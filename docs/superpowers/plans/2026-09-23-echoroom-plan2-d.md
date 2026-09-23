@@ -16,6 +16,7 @@
 - **主题变量纪律**：改样式一律走 CSS 变量；本次把既有硬编码派生色（`rgba(59,130,246,.15)`、`rgba(248,113,113,.15)`、`#262b36`、`#15181f`）收编为变量 `--accent-soft` / `--err-soft` / `--panel-hover` / `--panel-deep`；此后加主题只加一组变量
 - **设备回退纪律**：任何音频设备打开失败 → 回退系统默认 + emit `audio_device_fallback`（方向 + 原因）；运行时偏好清空（`None`），由前端收到事件后调 `set_*_device("")` 持久化并刷新下拉
 - **音效扩展约定**：新音效 = 放 `client/ui/sounds/<id>/in.mp3` + `out.mp3`，并在 `SOUND_PACKS` 注册一行；`"none"` 为关闭特例
+- **功能开关纪律**：`client/ui/features.js` 为唯一开关源（`sound` / `theme` / `background`，缺省全开）；关闭的功能 = 界面不渲染 + 行为不接线（音效播放短路 / 主题启动不套用 / 背景图不读不铺）；新增可关功能照此模式加一行
 - **背景图**：单文件 `%APPDATA%\com.echoroom.dev\background.img`（无扩展名，MIME 由文件头嗅探）；上限 10MB；仅 PNG/JPEG/WebP；换图直接覆盖、清除即删文件（无 config 字段——文件存在即生效）
 - **层级纪律**：设置页 `z-index: 22`（盖住观看视图 20/25，低于弹层 30）；资料弹窗 > 设置页 > 主界面
 - **每任务收尾**：`cargo test -p echoroom-client` 全绿 + 相关 `node --check`；末尾按步骤提交（仓库在 `dev` 分支）
@@ -35,9 +36,10 @@
 - `src/lib.rs`：SharedAudio 构造与命令注册更新
 
 **client / ui（前端）**
-- `index.html`：顶栏改造（Echo 放大 + ⚙）；设置页骨架（4 pane 内容逐步补齐）；资料弹窗标题「个人资料」
+- `features.js`（新）：功能开关（构建前配置；sound / theme / background）
+- `index.html`：顶栏改造（Echo 放大 + ⚙）；设置页骨架（4 pane 内容逐步补齐）；资料弹窗标题「个人资料」；引入 features.js
 - `style.css`：`--topbar-h` 与顶栏、设置页布局、6 组主题变量、4 处硬编码色变量化、音效块样式、背景图铺层
-- `app.js`：设置页逻辑（开关/分类/账号/设备/音效/主题/背景/登出）、音效注册表与播放改造
+- `app.js`：设置页逻辑（开关/分类/账号/设备/音效/主题/背景/登出）、功能开关接线（FEATURES）、音效注册表与播放改造
 - `video_capture.js`：摄像头设备（deviceId 应用 + 运行中重启 + 回退）
 - `sounds/default/in.mp3`、`out.mp3`（从 ui 根移入）
 - `tauri.conf.json`：版本 0.3.0
@@ -879,13 +881,15 @@ git add client/src-tauri/src/audio/playback.rs client/src-tauri/src/audio/sessio
 ### Task 5: 前端设置页骨架（顶栏改造 + 覆盖页 + 分类切换 + 版本号）
 
 **Files:**
-- Modify: `client/ui/index.html`（顶栏 + 设置页结构）
+- Create: `client/ui/features.js`（功能开关：sound / theme / background）
+- Modify: `client/ui/index.html`（顶栏 + 设置页结构 + features.js 引入）
 - Modify: `client/ui/style.css`（`--topbar-h`、顶栏与设置页样式、基础变量补充）
-- Modify: `client/ui/app.js`（开关 / 分类切换 / 齿轮门控 / 版本号）
+- Modify: `client/ui/app.js`（开关 / 分类切换 / 齿轮门控 / 版本号 / FEATURES 读取与分类隐藏）
 
 **Interfaces:**
 - Consumes: 无（纯骨架；各 pane 内容由 Task 6–9 补齐）
 - Produces（后续任务依赖）：
+  - `const FEATURES`（全局功能开关；各任务在渲染/接线处判断）
   - `openSettings()` / `closeSettings()` / `switchCat(cat)`
   - `const paneRefreshers = {}`：各页面任务注册刷新钩子（`paneRefreshers.device = refreshDevices` 等）
   - CSS 变量：`--topbar-h`、`--accent-soft`、`--err-soft`、`--panel-hover`、`--panel-deep`（默认值 = 现状色；Task 9 为其余主题重定义）
@@ -926,6 +930,12 @@ git add client/src-tauri/src/audio/playback.rs client/src-tauri/src/audio/sessio
       <section class="settings-pane" data-pane="appearance" hidden></section>
     </div>
   </div>
+```
+
+文件底部脚本区，在 `<script src="video_capture.js"></script>` 之前（即脚本区第一行）插入：
+
+```html
+  <script src="features.js"></script>
 ```
 
 - [ ] **Step 2: style.css——变量补充 + 顶栏替换 + 设置页样式**
@@ -1025,6 +1035,7 @@ git add client/src-tauri/src/audio/playback.rs client/src-tauri/src/audio/sessio
 }
 .settings-cat:hover { background: var(--panel); color: var(--text); }
 .settings-cat.active { background: var(--accent-soft); color: var(--accent); }
+.settings-cat[hidden] { display: none; } /* 功能开关关闭的分类 */
 .settings-version {
   margin-top: auto;
   padding: 0 10px 6px;
@@ -1041,7 +1052,27 @@ git add client/src-tauri/src/audio/playback.rs client/src-tauri/src/audio/sessio
 .settings-title { font-size: 15px; font-weight: 600; margin: 0 0 14px; }
 ```
 
-- [ ] **Step 3: app.js——齿轮图标 + 设置页逻辑**
+- [ ] **Step 3: features.js 创建 + app.js 齿轮图标与设置页逻辑**
+
+新建 `client/ui/features.js`：
+
+```js
+// EchoRoom 功能开关（构建前配置）
+// 修改后需重新打包生效：cargo tauri build（dev 模式刷新即生效）
+// 关闭的功能：界面不显示、行为不生效
+window.FEATURES = {
+  sound: true,      // 进出音效（含设置页"音效"分类）
+  theme: true,      // 6 套主题（含外观页主题区）
+  background: true, // 自定义背景图（含外观页背景图区）
+};
+```
+
+`app.js` 顶部 `// ---- 小工具 ----` 段（`const el = (id) => document.getElementById(id);` 行之后）加：
+
+```js
+// D：功能开关（features.js 提供；缺文件/缺项按全开）
+const FEATURES = Object.assign({ sound: true, theme: true, background: true }, window.FEATURES || {});
+```
 
 `ICONS` 对象（`avatar` 行之后）加：
 
@@ -1083,6 +1114,10 @@ el("settings-back").addEventListener("click", closeSettings);
 for (const btn of settingsPage.querySelectorAll(".settings-cat")) {
   btn.addEventListener("click", () => switchCat(btn.dataset.cat));
 }
+
+// D：功能开关——关闭的分类整个隐藏（features.js；默认全开时无副作用）
+if (!FEATURES.sound) settingsPage.querySelector('.settings-cat[data-cat="sound"]').hidden = true;
+if (!FEATURES.theme && !FEATURES.background) settingsPage.querySelector('.settings-cat[data-cat="appearance"]').hidden = true;
 ```
 
 - [ ] **Step 4: app.js——齿轮门控 + 版本号**
@@ -1114,11 +1149,11 @@ Expected: 无输出（语法通过）。
 - [ ] **Step 6: 提交**
 
 ```powershell
-git add client/ui/index.html client/ui/style.css client/ui/app.js; git commit -m "feat(client): settings page skeleton (topbar, overlay, categories)"
+git add client/ui/features.js client/ui/index.html client/ui/style.css client/ui/app.js; git commit -m "feat(client): settings page skeleton (topbar, overlay, categories)"
 ```
 
 ```markdown
-验收要点（手工，统一并入 Task 11 验收）：顶栏加高、Echo 放大、⚙ 出现在"连接中/已连接"右侧；未登录/断线时 ⚙ 隐藏且设置页自动收起；点 ⚙ 覆盖顶栏以下整个窗口，四个分类可切换、`‹ 返回` 关闭；开合期间聊天与卡片状态无损；左列底部显示版本号（本任务暂为 v0.3.0 静态值，构建后为真实版本）。
+验收要点（手工，统一并入 Task 11 验收）：顶栏加高、Echo 放大、⚙ 出现在"连接中/已连接"右侧；未登录/断线时 ⚙ 隐藏且设置页自动收起；点 ⚙ 覆盖顶栏以下整个窗口，四个分类可切换、`‹ 返回` 关闭；开合期间聊天与卡片状态无损；左列底部显示版本号（本任务暂为 v0.3.0 静态值，构建后为真实版本）；features.js 创建并接入（全开状态下与无开关行为一致；关闭矩阵验证在 Task 11）。
 ```
 ### Task 6: 账号页与退出登录
 
@@ -1653,7 +1688,7 @@ git add client/ui/index.html client/ui/style.css client/ui/app.js client/ui/vide
 - Modify: `client/ui/app.js`（注册表 + 播放函数改造 + 调用点替换 + 音效页渲染 + init 读方案）
 
 **Interfaces:**
-- Consumes: Task 2 命令 `set_sound_pack`；Task 1 的 `Config.sound_pack`；Task 5 的 `paneRefreshers`
+- Consumes: Task 2 命令 `set_sound_pack`；Task 1 的 `Config.sound_pack`；Task 5 的 `paneRefreshers` / `FEATURES`
 - Produces（后续任务依赖）：
   - `SOUND_PACKS = [{ id, name }]`（注册表）、全局 `soundPack`（当前方案，`"none"` = 关闭）
   - `playPackSnd(kind: "in" | "out")`（实播；替代原 `playSnd`）
@@ -1707,9 +1742,9 @@ function packAudio(id, kind) {
   return a;
 }
 
-// 实播：member_join / member_leave / 首次进入（"none" 不播）
+// 实播：member_join / member_leave / 首次进入（"none" 不播；功能开关关闭时不播）
 function playPackSnd(kind) {
-  if (soundPack === "none") return;
+  if (!FEATURES.sound || soundPack === "none") return;
   const a = packAudio(soundPack, kind);
   a.currentTime = 0; // 连点重入时从头播，不叠音
   a.play().catch(() => {}); // 文件缺失/自动播放被阻止：静默忽略
@@ -1866,7 +1901,7 @@ git add client/ui/sounds client/ui/index.html client/ui/style.css client/ui/app.
 ```
 
 ```markdown
-验收要点（手工，统一并入 Task 11 验收）：音效页 Default 块 ▶入场/▶离场可试听（不影响选中）；选中后他人进出/自己首进按方案播放、重连不重播；选「关闭（无提示音）」后无任何提示音；试听按钮不触发选中；重启客户端后方案保持（config.sound_pack）。
+验收要点（手工，统一并入 Task 11 验收）：音效页 Default 块 ▶入场/▶离场可试听（不影响选中）；选中后他人进出/自己首进按方案播放、重连不重播；选「关闭（无提示音）」后无任何提示音；试听按钮不触发选中；重启客户端后方案保持（config.sound_pack）；features.js 关闭 sound 时不播任何音效（含默认方案；Task 11 矩阵）。
 ```
 
 ---
@@ -1879,7 +1914,7 @@ git add client/ui/sounds client/ui/index.html client/ui/style.css client/ui/app.
 - Modify: `client/ui/app.js`（THEMES / applyTheme / 主题页渲染 / init 尽早应用）
 
 **Interfaces:**
-- Consumes: Task 2 命令 `set_theme`；Task 1 的 `Config.theme`；Task 5 已加的 4 个派生变量（`--accent-soft` / `--err-soft` / `--panel-hover` / `--panel-deep`）与 `paneRefreshers`
+- Consumes: Task 2 命令 `set_theme`；Task 1 的 `Config.theme`；Task 5 已加的 4 个派生变量（`--accent-soft` / `--err-soft` / `--panel-hover` / `--panel-deep`）、`paneRefreshers` 与 `FEATURES`
 - Produces（后续任务依赖）：
   - `THEMES = [{ id, name, accent }]`、`applyTheme(id)`、全局 `currentTheme`
   - `buildThemePane()`、`buildAppearancePane()`（`paneRefreshers.appearance` 注册；Task 10 会向其中追加背景图刷新）
@@ -2021,13 +2056,15 @@ git add client/ui/sounds client/ui/index.html client/ui/style.css client/ui/app.
 
 - [ ] **Step 3: index.html——外观 pane（主题部分）**
 
-Task 5 的 `<section class="settings-pane" data-pane="appearance" hidden></section>` 替换为：
+Task 5 的 `<section class="settings-pane" data-pane="appearance" hidden></section>` 替换为（主题区包在 `theme-section` 中，供功能开关隐藏）：
 
 ```html
       <section class="settings-pane" data-pane="appearance" hidden>
         <h2 class="settings-title">外观</h2>
-        <div class="appearance-label">主题</div>
-        <div class="theme-grid" id="theme-grid"></div>
+        <div id="theme-section">
+          <div class="appearance-label">主题</div>
+          <div class="theme-grid" id="theme-grid"></div>
+        </div>
       </section>
 ```
 
@@ -2101,18 +2138,21 @@ function buildThemePane() {
 }
 
 function buildAppearancePane() {
-  buildThemePane();
+  if (FEATURES.theme) buildThemePane(); // 功能开关：主题关闭则不构建
 }
 paneRefreshers.appearance = buildAppearancePane;
+
+// D：功能开关——主题关闭则整区隐藏（features.js）
+if (!FEATURES.theme) el("theme-section").hidden = true;
 ```
 
 `init()` 函数头替换（尽早防闪烁）：
 
 ```js
 async function init() {
-  // D：尽早取配置应用主题（防启动闪烁；后续 cfg 块读取其余设置）
+  // D：尽早取配置应用主题（防启动闪烁；后续 cfg 块读取其余设置；功能开关关闭时不套用 = 固定黛蓝）
   const bootCfg = await invoke("get_config").catch(() => null);
-  if (bootCfg) applyTheme(bootCfg.theme || "dianlan");
+  if (bootCfg && FEATURES.theme) applyTheme(bootCfg.theme || "dianlan");
   // 先注册监听器，再发起连接：保证事件不因时序竞态丢失
 ```
 
@@ -2130,7 +2170,7 @@ git add client/ui/index.html client/ui/style.css client/ui/app.js; git commit -m
 ```
 
 ```markdown
-验收要点（手工，统一并入 Task 11 验收）：6 套主题逐套点选——窗口底色/面板/边框/强调色（发送按钮、说话框 border、聚焦边、链接、激活态）成套变化，文字与红绿语义色不变；切换立即生效、开合设置页保持；重启客户端后主题保持；手改 config 为非法 id → 回默认黛蓝不崩。
+验收要点（手工，统一并入 Task 11 验收）：6 套主题逐套点选——窗口底色/面板/边框/强调色（发送按钮、说话框 border、聚焦边、链接、激活态）成套变化，文字与红绿语义色不变；切换立即生效、开合设置页保持；重启客户端后主题保持；手改 config 为非法 id → 回默认黛蓝不崩；features.js 关闭 theme 时外观页无主题区、启动固定黛蓝（不读 config.theme；Task 11 矩阵）。
 ```
 
 ---
@@ -2145,7 +2185,7 @@ git add client/ui/index.html client/ui/style.css client/ui/app.js; git commit -m
 - Modify: `client/ui/app.js`（背景逻辑段 + 外观刷新钩子 + init 启动加载）
 
 **Interfaces:**
-- Consumes: 既有 `default_config_path()`（`%APPDATA%\com.echoroom.dev\`）；Task 5 的 `paneRefreshers`；Task 9 的 `buildAppearancePane`；`send_video_frame` 已验证的原始字节通道（JS `u8.buffer` → Rust `InvokeBody::Raw`）
+- Consumes: 既有 `default_config_path()`（`%APPDATA%\com.echoroom.dev\`）；Task 5 的 `paneRefreshers` / `FEATURES`；Task 9 的 `buildAppearancePane`；`send_video_frame` 已验证的原始字节通道（JS `u8.buffer` → Rust `InvokeBody::Raw`）
 - Produces（后续任务依赖）：
   - 命令 `set_background(request)`（raw body ≤10MB + 文件头白名单）、`clear_background()`、`get_background() -> tauri::ipc::Response`（前端收到 **ArrayBuffer**；空 = 无图。tauri 2.11.5 源码已核实：`InvokeResponseBody::Raw` → 小载荷走 `new Uint8Array([...]).buffer`、大载荷走 fetch `arrayBuffer()`）
   - `background_path()`：单文件 `background.img`（无扩展名，MIME 由文件头嗅探）；**无 config 字段**（文件存在即生效）
@@ -2282,17 +2322,19 @@ Expected: workspace 编译通过。
 
 - [ ] **Step 6: index.html——外观 pane·背景图区**
 
-Task 9 的外观 pane 中 `<div class="theme-grid" id="theme-grid"></div>` 之后、`</section>` 之前插入：
+Task 9 的外观 pane 中 `theme-section` 的 `</div>` 之后、`</section>` 之前插入（整段包在 `bg-section` 中，供功能开关隐藏）：
 
 ```html
-        <div class="appearance-label">背景图</div>
-        <div class="bg-row">
-          <button class="settings-btn" id="bg-pick">选择图片</button>
-          <button class="settings-btn" id="bg-clear">清除</button>
-          <input id="bg-file" type="file" accept="image/*" hidden />
+        <div id="bg-section">
+          <div class="appearance-label">背景图</div>
+          <div class="bg-row">
+            <button class="settings-btn" id="bg-pick">选择图片</button>
+            <button class="settings-btn" id="bg-clear">清除</button>
+            <input id="bg-file" type="file" accept="image/*" hidden />
+          </div>
+          <div class="bg-preview" id="bg-preview" hidden></div>
+          <div class="settings-hint" id="bg-hint" hidden></div>
         </div>
-        <div class="bg-preview" id="bg-preview" hidden></div>
-        <div class="settings-hint" id="bg-hint" hidden></div>
 ```
 
 - [ ] **Step 7: style.css——背景样式与铺层**
@@ -2416,21 +2458,24 @@ el("bg-clear").addEventListener("click", async () => {
   clearBackgroundUi();
   showBgHint("");
 });
+
+// D：功能开关——背景图关闭则整区隐藏（features.js）
+if (!FEATURES.background) el("bg-section").hidden = true;
 ```
 
 Task 9 的 `buildAppearancePane` 改为：
 
 ```js
 function buildAppearancePane() {
-  buildThemePane();
-  refreshBackground();
+  if (FEATURES.theme) buildThemePane();
+  if (FEATURES.background) refreshBackground();
 }
 ```
 
 `init()` 的 cfg 块中 `soundPack = cfg.sound_pack || "default";` 行之后加：
 
 ```js
-  refreshBackground(); // D：背景图（文件存在即铺层；无图静默）
+  if (FEATURES.background) refreshBackground(); // D：背景图（文件存在即铺层；无图静默；功能开关关闭时不读不铺）
 ```
 
 - [ ] **Step 9: 语法校验**
@@ -2445,7 +2490,7 @@ git add client/src-tauri/src/bridge.rs client/src-tauri/src/lib.rs client/ui/ind
 ```
 
 ```markdown
-验收要点（手工，统一并入 Task 11 验收）：选择图片 → 立即铺满侧栏+卡片区+聊天+输入栏（卡片/文字仍可读）；缩略图显示；重启客户端保留；换图后旧文件被覆盖（`%APPDATA%\com.echoroom.dev\background.img` 只有一个）；清除 → 恢复纯色 + 文件消失；>10MB 被拒（提示）；伪造扩展名的非图片文件被拒（白名单嗅探）；设置页/登录页不铺背景。
+验收要点（手工，统一并入 Task 11 验收）：选择图片 → 立即铺满侧栏+卡片区+聊天+输入栏（卡片/文字仍可读）；缩略图显示；重启客户端保留；换图后旧文件被覆盖（`%APPDATA%\com.echoroom.dev\background.img` 只有一个）；清除 → 恢复纯色 + 文件消失；>10MB 被拒（提示）；伪造扩展名的非图片文件被拒（白名单嗅探）；设置页/登录页不铺背景；features.js 关闭 background 时外观页无背景图区且不铺层（Task 11 矩阵）。
 ```
 
 ---
@@ -2482,10 +2527,13 @@ Expected: workspace 编译通过。
 Run: `node --check client/ui/app.js`
 Expected: 无输出（语法通过）。
 
+Run: `node --check client/ui/features.js`
+Expected: 无输出（语法通过）。
+
 Run: `node --check client/ui/video_capture.js`
 Expected: 无输出（语法通过）。
 
-- [ ] **Step 3: 服务器 + 双客户端手工验收（10 条）**
+- [ ] **Step 3: 服务器 + 双客户端手工验收（11 条）**
 
 先启动服务器（终端 A；零协议改动，部署无需更新）：
 
@@ -2507,6 +2555,7 @@ Expected: `Echo server listening on 0.0.0.0:9000 (tcp+udp)`。
 | 8 | 退出登录 | 两段式确认退出 → 重启客户端 → 重新登录 | 回登录页（账号预填、不自动登录）；房间内他人看到离开；重登一切正常 |
 | 9 | 修改资料 | 设置页 [修改资料] → 改昵称/头像 | 弹窗标题「个人资料」、skip 为「取消」；保存后自己卡片与对方界面同步刷新 |
 | 10 | 版本号 | 设置页左列底部 | 显示 `v0.3.0`；顶栏 Echo 放大、⚙ 在连接状态右侧 |
+| 11 | 功能开关 | 改 `client/ui/features.js` 逐项 `false` → `cargo tauri dev` 重启（或直接重打包） | 音效关：设置页无「音效」分类 + 进出房无声（默认音效也不播）；主题关：外观页无主题区 + 皮肤固定黛蓝（不读 config.theme）；背景图关：外观页无背景图区 + 不铺层；主题+背景图同关：无「外观」分类；全关：只剩账号/设备；三项恢复 `true` 后一切如常 |
 
 - [ ] **Step 4: 桌面构建与产物拷贝**
 
@@ -2526,7 +2575,7 @@ Copy-Item 'E:\pro\EchoRoom\target\release\Echo.exe' "$env:USERPROFILE\Desktop" -
 Expected: 桌面出现 `Echo.exe` 与 `Echo_0.3.0_x64-setup.exe`。
 
 ```markdown
-交付说明：0.3.0 为纯客户端功能更新（协议零改动）——服务器无需重部署，旧版客户端可继续使用；所有设置（主题/设备/音效/背景图）存于客户端本地（`%APPDATA%\com.echoroom.dev\`），不随账号同步。
+交付说明：0.3.0 为纯客户端功能更新（协议零改动）——服务器无需重部署，旧版客户端可继续使用；所有设置（主题/设备/音效/背景图）存于客户端本地（`%APPDATA%\com.echoroom.dev\`），不随账号同步；功能开关在 `client/ui/features.js`（构建前配置，改后重新打包生效）。
 ```
 
 ---
@@ -2536,5 +2585,6 @@ Expected: 桌面出现 `Echo.exe` 与 `Echo_0.3.0_x64-setup.exe`。
 - 执行顺序严格按 Task 1 → 11；每个任务结束运行其验证命令（`cargo test -p echoroom-client` + 相关 `node --check`），全绿后才进入下一任务
 - Task 3/4 涉及音频线程真实设备操作：真机验证（耳机+扬声器、双麦克风）放在 Task 11 手工验收第 4/5 条统一做；Rust 侧仅保证编译与纯函数单测
 - 手工验收（Task 11 Step 3）需要服务器 + 两台客户端（可用 `sim_clients` 替代其一）；背景图/主题/音效为本地设置，重启验证用同一客户端即可
+- 功能开关（第 11 条）在 `client/ui/features.js`：验证矩阵用 `cargo tauri dev` 改动重启即可（快）；**最终交付前将三个开关恢复为 `true` 再打包**（除非用户明确要求关闭某项）
 - 全程零协议/服务器改动：`protocol` 与 `server` 不应出现任何 diff；若出现，说明任务越界，需回退
 - 仓库在 `dev` 分支；提交信息按各任务 Step 末尾给出；推送按用户确认后执行（与既往流程一致）
