@@ -21,7 +21,9 @@ pub struct DeviceInfo {
 
 /// 枚举某方向的活跃设备（DEVICE_STATE_ACTIVE；含 is_default 标记）
 pub fn list(direction: &Direction) -> Result<Vec<DeviceInfo>> {
-    wasapi::initialize_mta().ok().context("initialize COM (MTA)")?;
+    // COM 可能已按其他模式初始化（如 Tauri 主线程 STA）：重复初始化 MTA 会失败，忽略即可——
+    // COM 此时已可用，wasapi 的 COM 包装在 STA 下同样工作；真正不可用时由下方枚举调用报错。
+    let _ = wasapi::initialize_mta();
     let default_id = wasapi::get_default_device(direction)
         .ok()
         .and_then(|d| d.get_id().ok());
@@ -39,7 +41,8 @@ pub fn list(direction: &Direction) -> Result<Vec<DeviceInfo>> {
 
 /// 按 id 查找设备；找不到返回 None（由调用方决定回退系统默认）
 pub fn find(direction: &Direction, id: &str) -> Result<Option<Device>> {
-    wasapi::initialize_mta().ok().context("initialize COM (MTA)")?;
+    // 同 list()：COM 已按其他模式初始化时（STA 主线程）忽略 MTA 重复初始化
+    let _ = wasapi::initialize_mta();
     let col = DeviceCollection::new(direction).map_err(err2any).context("设备集合")?;
     let n = col.get_nbr_devices().map_err(err2any).context("设备数量")?;
     for i in 0..n {

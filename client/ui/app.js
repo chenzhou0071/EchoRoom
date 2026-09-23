@@ -212,8 +212,12 @@ function buildCard(uid, m) {
       if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) {
         await videoCapture.stop(videoCapture.STREAM_CAMERA); // 预览退出由流停止逻辑驱动（R2）
       } else {
-        await videoCapture.startCamera();
-        if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) enterSelfPreview(); // R8：连同另一路活跃流一起进
+        const ok = await videoCapture.startCamera();
+        if (!ok) {
+          alert("无法开启摄像头：请在系统授权弹窗中选择「允许」；稍等片刻再重试，或检查设备是否被其他应用占用");
+        } else if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) {
+          enterSelfPreview(); // R8：连同另一路活跃流一起进
+        }
       }
       renderMembers();
     });
@@ -506,8 +510,12 @@ sharePop.querySelector("#sp-cam").addEventListener("click", async () => {
   if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) {
     await videoCapture.stop(videoCapture.STREAM_CAMERA); // 预览退出由流停止逻辑驱动（R2）
   } else {
-    await videoCapture.startCamera();
-    if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) enterSelfPreview(); // R8：连同另一路活跃流一起进
+    const ok = await videoCapture.startCamera();
+    if (!ok) {
+      alert("无法开启摄像头：请在系统授权弹窗中选择「允许」；稍等片刻再重试，或检查设备是否被其他应用占用");
+    } else if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) {
+      enterSelfPreview(); // R8：连同另一路活跃流一起进
+    }
   }
   renderMembers();
   syncSharePop();
@@ -917,7 +925,17 @@ function showDeviceHint(msg) {
 }
 
 /// 用设备列表重建下拉；current 不在列表中 → 落到「系统默认」显示（回退由事件路径持久化）
+/// 列表未变化时不重建 DOM：pointerdown 触发的异步刷新若重建 options，会强制收起已展开的原生下拉
 function fillDeviceSelect(sel, devices, current, defaultLabel) {
+  const sig = JSON.stringify(devices);
+  if (sel.dataset.sig === sig) {
+    if (sel.value !== current) {
+      sel.value = current;
+      if (sel.value !== current) sel.value = ""; // 设定值不在列表中：落到系统默认
+    }
+    return;
+  }
+  sel.dataset.sig = sig;
   sel.replaceChildren();
   const def = document.createElement("option");
   def.value = "";
@@ -941,25 +959,54 @@ async function refreshDevices() {
     audio = await invoke("list_audio_devices");
   } catch (e) {
     console.warn("音频设备枚举失败:", e);
+    showDeviceHint("音频设备枚举失败：" + e); // 帮助定位（成功时该提示 6 秒后自动消失）
   }
   const cfg = await invoke("get_config").catch(() => null);
   fillDeviceSelect(el("dev-input"), audio.inputs, cfg ? cfg.input_device : "", "系统默认");
   fillDeviceSelect(el("dev-output"), audio.outputs, cfg ? cfg.output_device : "", "系统默认");
-  // 2) 摄像头（浏览器 enumerateDevices；未授权过 label 为空 → 显示序号）
+  // 2) 摄像头（浏览器 enumerateDevices；未授权时 deviceId 为空 → 无法定位设备，过滤并以提示引导）
   let cams = [];
+  let camLocked = false; // 有摄像头但未授权（deviceId 全空）
   try {
     const all = await navigator.mediaDevices.enumerateDevices();
-    cams = all
-      .filter((d) => d.kind === "videoinput")
+    const vids = all.filter((d) => d.kind === "videoinput");
+    cams = vids
+      .filter((d) => d.deviceId) // 空 deviceId 选项与「系统默认」同值（选了等于没选），不入列表
       .map((d, i) => ({ id: d.deviceId, name: d.label || "摄像头 " + (i + 1) }));
+    camLocked = vids.length > 0 && cams.length === 0;
   } catch (e) {
     console.warn("摄像头枚举失败:", e);
   }
   let camPref = cfg ? cfg.camera_device : "";
   if (camPref && !cams.some((c) => c.id === camPref)) camPref = ""; // 无法匹配：显示系统默认
   fillDeviceSelect(el("dev-camera"), cams, camPref, "系统默认");
+  if (camLocked) showDeviceHint("开启一次摄像头后可选择具体设备（当前设备列表未授权）");
 }
 paneRefreshers.device = refreshDevices;
+
+// D：摄像头授权预热——投屏激活时首次授权的弹窗会被共享状态干扰（出现即消失），
+// 故在本次运行首次登录（含自动登录）完成后主动请求一次：界面稳定、无投屏，用户允许后记录持久化。
+// 已授权（deviceId 非空）/无摄像头/曾被拒绝时跳过；仅尝试一次（重连的 auth_ok 不重复触发）。
+let cameraWarmupDone = false;
+async function warmupCameraAuth() {
+  if (cameraWarmupDone) return;
+  cameraWarmupDone = true;
+  try {
+    const vids = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    if (vids.length === 0 || vids.every((d) => d.deviceId)) return; // 无摄像头 / 已授权
+    let perm = null;
+    try {
+      perm = await navigator.permissions.query({ name: "camera" });
+    } catch {}
+    if (perm && perm.state === "denied") return; // 曾被拒绝：不再打扰（开摄像头时仍有失败提示）
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    stream.getTracks().forEach((t) => t.stop()); // 只为走授权：立即释放（摄像头指示灯一闪）
+    console.log("[devices] 摄像头授权完成");
+    refreshDevices(); // 授权后 label/deviceId 就绪：设置页列表显示真实设备名
+  } catch (e) {
+    console.warn("[devices] 摄像头授权未完成:", e);
+  }
+}
 
 el("dev-input").addEventListener("change", () => {
   invoke("set_input_device", { id: el("dev-input").value }).catch((e) => console.warn(e));
@@ -972,16 +1019,20 @@ el("dev-camera").addEventListener("change", async () => {
   await invoke("set_camera_device", { id }).catch((e) => console.warn(e));
   videoCapture.setCameraDevice(id);
   if (videoCapture.isActive(videoCapture.STREAM_CAMERA)) {
-    await videoCapture.restartCamera(); // 运行中：自动重启（失效回退在 startCamera 内部）
+    const ok = await videoCapture.restartCamera(); // 运行中：自动重启（失效回退在 startCamera 内部）
+    if (!ok) showDeviceHint("摄像头切换失败：请检查设备是否可用");
     renderMembers(); // 卡片摄像头按钮态跟随
   }
   refreshDevices(); // 回退/切换后同步下拉显示
 });
 
-// 展开下拉前刷新（pointerdown 先于原生下拉展开；3 秒防抖避免高频枚举）
+// 展开下拉后刷新（延迟让原生弹层先稳定创建：立即刷新会在弹层创建窗口内竞争宿主线程，
+// 投屏中曾表现为"按下瞬间收起"；3 秒防抖避免高频枚举，diff 保证列表未变时不重建 DOM）
 for (const id of ["dev-input", "dev-output", "dev-camera"]) {
   el(id).addEventListener("pointerdown", () => {
-    if (Date.now() - devicesFreshAt > 3000) refreshDevices();
+    setTimeout(() => {
+      if (Date.now() - devicesFreshAt > 3000) refreshDevices();
+    }, 300);
   });
 }
 
@@ -1293,6 +1344,8 @@ async function init() {
     const wasRegister = lastAuthAttempt === "register";
     lastAuthAttempt = null;
     if (wasRegister) openProfilePop(el("setup-account").value.trim()); // 注册成功 → 弹「完善资料」
+    // D：登录完成后延迟预热摄像头授权——首次运行的授权弹窗在界面稳定时弹出（已授权时内部跳过）
+    setTimeout(() => warmupCameraAuth(), 800);
   });
   await listen("auth_fail", (e) => {
     el("setup-submit").disabled = false;

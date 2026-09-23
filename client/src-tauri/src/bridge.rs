@@ -400,9 +400,11 @@ pub fn set_screen_gain(state: State<AppState>, gain: f32) {
     persist(&state);
 }
 
-/// 枚举音频输入/输出设备（wasapi；含系统默认标记）
+/// 枚举音频输入/输出设备（wasapi；含系统默认标记）。
+/// async：COM 枚举跑在线程池而非主线程——同步命令在主线程执行，投屏中逐帧上行任务排队时会拖延
+/// 枚举完成，冻结 WebView2 宿主 UI，导致设备下拉"按下瞬间收起"。
 #[tauri::command]
-pub fn list_audio_devices() -> Result<serde_json::Value, String> {
+pub async fn list_audio_devices() -> Result<serde_json::Value, String> {
     let inputs = crate::audio::device::list(&wasapi::Direction::Capture).map_err(|e| e.to_string())?;
     let outputs = crate::audio::device::list(&wasapi::Direction::Render).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "inputs": inputs, "outputs": outputs }))

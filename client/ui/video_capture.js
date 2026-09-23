@@ -143,18 +143,38 @@ window.videoCapture = (() => {
     await invoke("set_share_active", { active: true }).catch(() => {});
   }
 
-  // D：摄像头设备（空 = 系统默认）。deviceId 由设置页写入；不匹配（设备拔出）→ 清偏好回退默认。
+  // D：摄像头设备（空 = 系统默认）。deviceId 由设置页写入；确认失效（设备拔出）→ 清偏好回退默认。
   let cameraDeviceId = "";
+  let cameraStarting = null; // in-flight 去重：等待授权期间重复点击复用同一请求（并发请求会顶掉系统授权框）
 
   function setCameraDevice(id) {
     cameraDeviceId = id || "";
   }
 
-  /// 按 deviceId 打开摄像头流；失败返回 null（不抛）。
+  /// 仅设备失效（拔出/约束失配）才值得回退默认。权限拒绝（NotAllowedError）、请求中止（AbortError）、
+  /// 设备占用（NotReadableError）时立即重发只会加剧 Chromium 权限限流（授权框消失后长时间不再弹）。
+  function deviceGone(e) {
+    return e && (e.name === "NotFoundError" || e.name === "OverconstrainedError");
+  }
+
+  /// 偏好是否仍有效：未授权（deviceId 全空）时无法判定 → 保留（授权一次后可恢复）；
+  /// 已授权且列表中没有该 id → 设备确实已失效；枚举失败 → 保守保留。
+  async function cameraPrefStillValid() {
+    try {
+      const vids = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+      const ids = vids.filter((d) => d.deviceId).map((d) => d.deviceId);
+      if (ids.length === 0) return true;
+      return ids.includes(cameraDeviceId);
+    } catch {
+      return true;
+    }
+  }
+
+  /// 按 deviceId 打开摄像头流；返回 { stream } 或 { err }（不抛）。
   /// exact 约束：选中设备必须命中——命中不了说明已失效，交由 startCamera 回退。
   async function tryGetCamera(deviceId) {
     try {
-      return await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: { ideal: 1280 },
           height: { ideal: 720 },
@@ -162,28 +182,49 @@ window.videoCapture = (() => {
           ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
         },
       });
+      return { stream };
     } catch (e) {
-      console.warn("[video] 摄像头开启失败:", e.message);
-      return null;
+      console.warn("[video] 摄像头开启失败:", e.name, e.message);
+      return { err: e };
     }
+  }
+
+  /// 偏好失效回退：确认失效才清偏好（持久化）+ 通知 UI；未授权等情况保留偏好，仅本次按默认开。
+  async function fallbackCamera() {
+    if (await cameraPrefStillValid()) {
+      console.warn("[video] 摄像头偏好暂无法判定（未授权/枚举异常），保留偏好并按系统默认开启");
+    } else {
+      console.warn("[video] 所选摄像头已失效，回退系统默认");
+      cameraDeviceId = "";
+      await invoke("set_camera_device", { id: "" }).catch(() => {});
+      window.dispatchEvent(new CustomEvent("camera-device-fallback"));
+    }
+    return await tryGetCamera("");
   }
 
   /// 返回 true = 摄像头流已就绪
   async function startCamera() {
     if (sessions.has(STREAM_CAMERA)) return true;
-    let stream = await tryGetCamera(cameraDeviceId);
-    if (!stream && cameraDeviceId) {
-      // 所选设备打不开（拔出/被占用）：清偏好（持久化）→ 回退系统默认 → 通知 UI
-      console.warn("[video] 所选摄像头不可用，回退系统默认");
-      cameraDeviceId = "";
-      await invoke("set_camera_device", { id: "" }).catch(() => {});
-      window.dispatchEvent(new CustomEvent("camera-device-fallback"));
-      stream = await tryGetCamera("");
-    }
-    if (!stream) return false;
-    await startPipeline(STREAM_CAMERA, stream);
-    await invoke("report_stream", { kind: STREAM_CAMERA, on: true }).catch(() => {});
-    return true;
+    if (cameraStarting) return cameraStarting; // 并发点击复用同一请求（授权框只弹一次）
+    cameraStarting = (async () => {
+      try {
+        let r = await tryGetCamera(cameraDeviceId);
+        if (r.err && cameraDeviceId && deviceGone(r.err)) r = await fallbackCamera();
+        if (!r.stream) return false;
+        try {
+          await startPipeline(STREAM_CAMERA, r.stream);
+        } catch (e) {
+          console.warn("[video] 摄像头管线启动失败:", e.message);
+          r.stream.getTracks().forEach((t) => t.stop()); // 关掉刚获取的流，避免摄像头指示灯常亮
+          return false;
+        }
+        await invoke("report_stream", { kind: STREAM_CAMERA, on: true }).catch(() => {});
+        return true;
+      } finally {
+        cameraStarting = null;
+      }
+    })();
+    return cameraStarting;
   }
 
   /// D：运行中切换摄像头——停→开（观众端短暂中断后由新流 IDR 恢复）；返回是否恢复成功

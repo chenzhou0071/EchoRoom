@@ -354,6 +354,8 @@ body {
   background: rgba(10, 12, 16, .72);
 }
 .setup-mask.hidden { display: none; }
+/* D：资料弹窗从设置页（z-index 22）打开，须盖在设置页之上 */
+#profile-mask { z-index: 30; }
 .setup-panel {
   width: 300px;
   display: flex;
