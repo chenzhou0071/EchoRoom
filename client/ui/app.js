@@ -1043,8 +1043,58 @@ function buildSoundPane() {
 }
 paneRefreshers.sound = buildSoundPane;
 
+// ---- D：外观页·主题（6 套预设：底色系 + 强调色成套切换；文字/语义色不变） ----
+const THEMES = [
+  { id: "dianlan", name: "黛蓝", accent: "#3b82f6" },
+  { id: "anzi", name: "暗紫", accent: "#a78bfa" },
+  { id: "molv", name: "墨绿", accent: "#34d399" },
+  { id: "yingfen", name: "樱粉", accent: "#f472b6" },
+  { id: "hupo", name: "琥珀", accent: "#fbbf24" },
+  { id: "qinglan", name: "青岚", accent: "#22d3ee" },
+];
+let currentTheme = "dianlan";
+
+function applyTheme(id) {
+  if (!THEMES.some((t) => t.id === id)) id = "dianlan"; // 未知 id（手改配置）：回默认
+  currentTheme = id;
+  document.documentElement.dataset.theme = id;
+}
+
+function buildThemePane() {
+  const grid = el("theme-grid");
+  grid.replaceChildren();
+  for (const t of THEMES) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "theme-chip" + (currentTheme === t.id ? " active" : "");
+    b.dataset.themeId = t.id;
+    const dot = document.createElement("span");
+    dot.className = "theme-dot";
+    dot.style.background = t.accent;
+    b.appendChild(dot);
+    b.appendChild(document.createTextNode(t.name));
+    b.addEventListener("click", () => {
+      applyTheme(t.id);
+      invoke("set_theme", { theme: t.id }).catch((e) => console.warn(e));
+      buildThemePane(); // 更新选中态
+    });
+    grid.appendChild(b);
+  }
+}
+
+function buildAppearancePane() {
+  if (FEATURES.theme) buildThemePane(); // 功能开关：主题关闭则不构建
+}
+paneRefreshers.appearance = buildAppearancePane;
+
+// D：功能开关——主题关闭则整区隐藏（features.js）
+if (!FEATURES.theme) el("theme-section").hidden = true;
+
 // ---- 事件接线与启动 ----
 async function init() {
+  // D：尽早取配置应用主题（防启动闪烁；后续 cfg 块读取其余设置；功能开关关闭时不套用 = 固定黛蓝）
+  const bootCfg = await invoke("get_config").catch(() => null);
+  if (bootCfg && FEATURES.theme) applyTheme(bootCfg.theme || "dianlan");
   // 先注册监听器，再发起连接：保证事件不因时序竞态丢失
   await listen("self_uid", (e) => {
     myUid = e.payload;
