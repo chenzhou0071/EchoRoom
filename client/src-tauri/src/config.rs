@@ -16,6 +16,14 @@ fn default_share_quality() -> String {
     "720p30".into()
 }
 
+fn default_theme() -> String {
+    "dianlan".into()
+}
+
+fn default_sound_pack() -> String {
+    "default".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub server_addr: String,
@@ -43,6 +51,21 @@ pub struct Config {
     /// 投屏时是否共享系统声音（Win11+）
     #[serde(default = "default_true")]
     pub share_audio: bool,
+    /// 音频输入设备 id（空 = 系统默认）
+    #[serde(default)]
+    pub input_device: String,
+    /// 音频输出设备 id（空 = 系统默认）
+    #[serde(default)]
+    pub output_device: String,
+    /// 摄像头设备 id（空 = 系统默认）
+    #[serde(default)]
+    pub camera_device: String,
+    /// 界面主题 id（"dianlan" / "anzi" / "molv" / "yingfen" / "hupo" / "qinglan"）
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// 进出音效方案（"default" / "none" / 未来 id）
+    #[serde(default = "default_sound_pack")]
+    pub sound_pack: String,
 }
 
 impl Default for Config {
@@ -57,6 +80,11 @@ impl Default for Config {
             screen_gain: 1.0,
             share_quality: "720p30".into(),
             share_audio: true,
+            input_device: String::new(),
+            output_device: String::new(),
+            camera_device: String::new(),
+            theme: "dianlan".into(),
+            sound_pack: "default".into(),
         }
     }
 }
@@ -119,6 +147,34 @@ mod tests {
         assert_eq!(loaded.screen_gain, 1.0);
         assert_eq!(loaded.share_quality, "720p30");
         assert!(loaded.share_audio);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn roundtrip_with_settings_fields() {
+        let path = std::env::temp_dir().join("echoroom_cfg_test_settings.json");
+        let mut cfg = Config::default();
+        cfg.input_device = "dev-in-1".into();
+        cfg.output_device = "dev-out-2".into();
+        cfg.camera_device = "cam-3".into();
+        cfg.theme = "anzi".into();
+        cfg.sound_pack = "none".into();
+        cfg.save(&path).unwrap();
+        let loaded = Config::load(&path);
+        assert_eq!(loaded, cfg);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn old_config_without_settings_fields_loads_defaults() {
+        let path = std::env::temp_dir().join("echoroom_cfg_test_old2.json");
+        std::fs::write(&path, r#"{"server_addr":"127.0.0.1:9000","account":"alice"}"#).unwrap();
+        let loaded = Config::load(&path);
+        assert!(loaded.input_device.is_empty());
+        assert!(loaded.output_device.is_empty());
+        assert!(loaded.camera_device.is_empty());
+        assert_eq!(loaded.theme, "dianlan");
+        assert_eq!(loaded.sound_pack, "default");
         let _ = std::fs::remove_file(&path);
     }
 }
