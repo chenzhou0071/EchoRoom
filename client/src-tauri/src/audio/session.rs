@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use echoroom_protocol::FRAME_SAMPLES;
+use tauri::Emitter;
 
 use crate::audio::capture::MicCapture;
 use crate::audio::denoise::Denoiser;
@@ -13,6 +14,7 @@ use crate::audio::jitter::{JitterBuffer, PopResult};
 use crate::audio::mixer::MixAccumulator;
 use crate::audio::opus::OpusDec;
 use crate::audio::vad::SpeakingDetector;
+use crate::bridge::Bridge;
 use crate::net::tcp::NetCmd;
 
 /// 音量/静音共享态：bridge（写）+ 网络线程（写 uid_names）+ 音频线程（读）三方共享。
@@ -143,32 +145,46 @@ pub fn spawn_audio_pipeline(
     token: u32,
     tcp_tx: std::sync::mpsc::Sender<NetCmd>,
     shared: SharedAudio,
+    bridge: Bridge,
 ) -> anyhow::Result<AudioHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let (udp_tx, udp_rx) = crate::net::udp::spawn_udp(server_addr, uid, token, stop.clone())?;
     let tx_pcm = udp_tx.tx_pcm.clone();
     let rx_voice = udp_rx.rx_voice;
 
-    // 采集线程：MicCapture → 累积 960 → 降噪 →（增益）→ VAD → tx_pcm
+    // 采集线程：MicCapture → 累积 960 → 降噪 →（增益）→ VAD → tx_pcm；
+    // 每轮检查设备偏好变化 → 线程内热切换（保降噪/VAD 状态，仅换句柄）
     {
         let stop = stop.clone();
         let self_gain = shared.self_gain.clone();
         let self_muted = shared.self_muted.clone();
+        let input_device = shared.input_device.clone();
+        let bridge = bridge.clone();
         std::thread::spawn(move || {
-            let mic = match MicCapture::open() {
-                Ok(m) => m,
-                Err(e) => {
-                    // 不发 conn 事件：TCP 连接实际正常，此处仅音频不可用
-                    eprintln!("[audio] 麦克风不可用: {e:#}");
-                    return;
-                }
+            // 按偏好打开（所选设备不可用 → 自动回退系统默认 + 上报，与切换路径同一逻辑）
+            let mut mic = match open_mic(&input_device, &bridge) {
+                Some(m) => m,
+                None => return,
             };
+            let mut pref = input_device.lock().unwrap().clone(); // 实际生效偏好（可能已回退为 None）
             let mut denoiser = Denoiser::new();
             // 阈值实测自降噪后信号（底噪残留 ≈ 17、语音 ≥ 200）：进入 50 / 退出 25
             let mut detector = SpeakingDetector::new(50.0, 25.0, Duration::from_millis(400));
             let mut pending: Vec<i16> = Vec::with_capacity(1920);
             let mut was_muted = false;
             while !stop.load(Ordering::Relaxed) {
+                // 设备偏好变化 → 热切换（失效自动回退 + 上报，逻辑见 open_mic）
+                let want = input_device.lock().unwrap().clone();
+                if want != pref {
+                    match open_mic(&input_device, &bridge) {
+                        Some(m) => {
+                            mic = m;
+                            pref = input_device.lock().unwrap().clone(); // 归一化后的实际偏好
+                            println!("[audio] 麦克风已切换");
+                        }
+                        None => return, // 默认设备也不可用：放弃采集（恢复由下次启动/重连触发）
+                    }
+                }
                 if let Err(e) = mic.pump(&mut pending) {
                     eprintln!("[audio] 采集错误: {e:#}");
                     break;
@@ -364,6 +380,35 @@ pub fn spawn_audio_pipeline(
         video_rx: Arc::new(std::sync::Mutex::new(udp_rx.rx_video)),
         screen_pcm_tx,
     })
+}
+
+/// 按偏好打开麦克风；所选设备不可用 → 清偏好 + 上报 `audio_device_fallback` + 回退系统默认。
+/// None = 连系统默认都打不开（调用方决定中断/放弃）。启动与切换两条路径共用。
+fn open_mic(input_device: &std::sync::Mutex<Option<String>>, bridge: &Bridge) -> Option<MicCapture> {
+    let pref = input_device.lock().unwrap().clone();
+    match MicCapture::open(pref.as_deref()) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            if let Some(bad) = pref {
+                eprintln!("[audio] 麦克风 `{bad}` 不可用: {e:#}，回退系统默认");
+                input_device.lock().unwrap().take(); // 运行时清空；前端据事件持久化
+                let _ = bridge.app.emit(
+                    "audio_device_fallback",
+                    serde_json::json!({ "direction": "input", "reason": e.to_string() }),
+                );
+                match MicCapture::open(None) {
+                    Ok(m) => Some(m),
+                    Err(e2) => {
+                        eprintln!("[audio] 默认麦克风不可用: {e2:#}");
+                        None
+                    }
+                }
+            } else {
+                eprintln!("[audio] 麦克风不可用: {e:#}");
+                None
+            }
+        }
+    }
 }
 
 #[cfg(test)]

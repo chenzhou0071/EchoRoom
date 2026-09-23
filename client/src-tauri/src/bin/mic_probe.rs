@@ -12,7 +12,7 @@ fn rms(pcm: &[i16]) -> f64 {
 }
 
 fn main() -> anyhow::Result<()> {
-    let mic = MicCapture::open()?;
+    let mic = MicCapture::open(None)?;
     println!(
         "mic_probe: 采样率 {}Hz，每秒打印一次（Ctrl+C 退出）",
         mic.sample_rate()

@@ -366,6 +366,7 @@ pub fn start_audio(
         token,
         tcp_tx,
         state.shared.clone(),
+        Bridge { app: app.clone() },
     ) {
         Ok(h) => *slot = Some(h),
         Err(e) => eprintln!("[audio] 管线启动失败: {e:#}"),

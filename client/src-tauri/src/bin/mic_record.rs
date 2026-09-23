@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
             .into_owned()
     });
 
-    let mic = MicCapture::open()?;
+    let mic = MicCapture::open(None)?;
     let rate = mic.sample_rate();
     let mut audio: Vec<i16> = Vec::new();
 

@@ -24,13 +24,18 @@ pub struct MicCapture {
 }
 
 impl MicCapture {
-    pub fn open() -> Result<MicCapture> {
+    pub fn open(device_id: Option<&str>) -> Result<MicCapture> {
         wasapi::initialize_mta()
             .ok()
             .context("initialize COM (MTA)")?;
-        let device = wasapi::get_default_device(&Direction::Capture)
-            .map_err(err2any)
-            .context("default capture device")?;
+        let device = match device_id {
+            Some(id) => crate::audio::device::find(&Direction::Capture, id)
+                .context("查找所选麦克风")?
+                .ok_or_else(|| anyhow::anyhow!("所选麦克风不存在"))?,
+            None => wasapi::get_default_device(&Direction::Capture)
+                .map_err(err2any)
+                .context("default capture device")?,
+        };
         let mut client = device
             .get_iaudioclient()
             .map_err(err2any)

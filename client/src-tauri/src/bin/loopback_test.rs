@@ -11,7 +11,7 @@ fn main() -> anyhow::Result<()> {
     println!("loopback_test: 麦克风直通自听（Ctrl+C 退出）");
     println!("⚠ 必须戴耳机！外放会啸叫。");
 
-    let mic = MicCapture::open()?;
+    let mic = MicCapture::open(None)?;
     // 容量 2 块（~40ms）：满则丢弃（实时优先，低延迟）
     let (tx, rx) = sync_channel::<Vec<i16>>(2);
 
