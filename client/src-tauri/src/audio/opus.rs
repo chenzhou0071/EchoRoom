@@ -1,4 +1,5 @@
 //! Opus 编解码封装（48kHz 单声道，20ms 帧 = 960 样本）。
+//! 麦克风用 Audio 模式 + 64kbps：全带宽 20kHz（Voip 模式偏 SILK，高频封顶 ~12kHz 发闷）。
 use audiopus::coder::{Decoder, Encoder};
 use audiopus::{Application, Bitrate, Channels, SampleRate};
 
@@ -9,15 +10,16 @@ pub struct OpusEnc(Encoder);
 
 impl OpusEnc {
     pub fn new() -> Result<Self, audiopus::Error> {
-        let mut e = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
+        let mut e = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Audio)?;
         e.set_bitrate(Bitrate::BitsPerSecond(OPUS_BITRATE))?;
+        e.set_complexity(10)?; // 最高复杂度（默认 9）：单路语音 CPU 开销可忽略
         Ok(Self(e))
     }
 
     /// 编码一帧（pcm.len() 必须为 FRAME_SAMPLES）
     pub fn encode(&mut self, pcm: &[i16]) -> Result<Vec<u8>, audiopus::Error> {
         debug_assert_eq!(pcm.len(), FRAME_SAMPLES);
-        let mut out = vec![0u8; 512]; // 40kbps×20ms≈100B，512 有充足余量
+        let mut out = vec![0u8; 512]; // 64kbps×20ms≈160B，512 有充足余量
         let n = self.0.encode(pcm, &mut out)?;
         out.truncate(n);
         Ok(out)

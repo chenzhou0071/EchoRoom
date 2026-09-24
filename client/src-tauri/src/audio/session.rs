@@ -1,15 +1,16 @@
-//! 音频管线编排：采集（含 RNNoise 降噪）→ Opus → UDP 发送；
+//! 音频管线编排：采集（高通 → RNNoise → 咔嗒抑制 → 增益软限幅 → 压缩）→ Opus → UDP 发送；
 //! UDP 接收 → 抖动缓冲 → Opus 解码（缺帧 PLC）→ 混音软限幅 → WASAPI 播放。
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use echoroom_protocol::FRAME_SAMPLES;
+use echoroom_protocol::{FRAME_SAMPLES, SAMPLE_RATE};
 use tauri::Emitter;
 
 use crate::audio::capture::MicCapture;
 use crate::audio::denoise::Denoiser;
+use crate::audio::dsp;
 use crate::audio::jitter::{JitterBuffer, PopResult};
 use crate::audio::mixer::MixAccumulator;
 use crate::audio::opus::OpusDec;
@@ -135,7 +136,7 @@ impl Sender {
 /// 启动完整音频管线（登录成功后调用；失败不影响文字聊天）。
 ///
 /// 线程：
-/// 1. 采集线程：MicCapture（960 块）→ Denoiser 降噪 → VAD 说话状态上报 → tx_pcm
+/// 1. 采集线程：MicCapture（960 块）→ 高通 → Denoiser（降噪+干湿混合）→ 咔嗒抑制 → 增益软限幅 → 压缩 → VAD → tx_pcm
 /// 2. UDP 发送/接收线程（net::udp）
 /// 3. 播放线程：drain 语音 → 每发送者抖动缓冲 → 解码/PLC → 混音 → 声卡回调
 /// 4. 监视线程：stop 置位后关闭播放器
@@ -152,7 +153,7 @@ pub fn spawn_audio_pipeline(
     let tx_pcm = udp_tx.tx_pcm.clone();
     let rx_voice = udp_rx.rx_voice;
 
-    // 采集线程：MicCapture → 累积 960 → 降噪 →（增益）→ VAD → tx_pcm；
+    // 采集线程：MicCapture → 累积 960 → 高通 → 降噪 → 咔嗒抑制 → 增益软限幅 → 压缩 → VAD → tx_pcm；
     // 每轮检查设备偏好变化 → 线程内热切换（保降噪/VAD 状态，仅换句柄）
     {
         let stop = stop.clone();
@@ -168,6 +169,9 @@ pub fn spawn_audio_pipeline(
             };
             let mut pref = input_device.lock().unwrap().clone(); // 实际生效偏好（可能已回退为 None）
             let mut denoiser = Denoiser::new();
+            let mut hpf = dsp::HighPass::new(dsp::MIC_HPF_HZ, SAMPLE_RATE as f32);
+            let mut declicker = dsp::DeClicker::new(SAMPLE_RATE as f32);
+            let mut leveller = dsp::Leveller::new();
             // 阈值实测自降噪后信号（底噪残留 ≈ 17、语音 ≥ 200）：进入 50 / 退出 25
             let mut detector = SpeakingDetector::new(50.0, 25.0, Duration::from_millis(400));
             let mut pending: Vec<i16> = Vec::with_capacity(1920);
@@ -191,14 +195,14 @@ pub fn spawn_audio_pipeline(
                 }
                 while pending.len() >= FRAME_SAMPLES {
                     let mut block: Vec<i16> = pending.drain(..FRAME_SAMPLES).collect();
-                    denoiser.process(&mut block); // 960 = 480×2 帧，整倍数合法
-                    // 采集增益：denoise 后、VAD 前（增益调大 → VAD 更灵敏，符合直觉）
+                    hpf.process(&mut block); // 高通 100Hz：切爆破音/震动低频（治喷麦）
+                    denoiser.process(&mut block); // RNNoise + 自适应干湿混合；960 = 480×2 帧
+                    declicker.process(&mut block); // 咔嗒瞬态抑制：压键盘按键的高频脉冲（语音主体不动）
+                    // 采集增益 + 软限幅（f32 域一次完成）：增益调大 → VAD 更灵敏；
+                    // 软限幅替代原硬 clamp：大声音/高增益平滑压缩，不再削顶爆音
                     let g = f32::from_bits(self_gain.load(Ordering::Relaxed));
-                    if (g - 1.0).abs() > 1e-6 {
-                        for s in block.iter_mut() {
-                            *s = ((*s as f32) * g).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-                        }
-                    }
+                    dsp::gain_and_limit(&mut block, g);
+                    leveller.process(&mut block); // 压缩器：持续过响（吹麦/近讲/喊叫）整体下压，治超大声破音
                     let rms = (block.iter().map(|&s| (s as f64).powi(2)).sum::<f64>()
                         / block.len() as f64)
                         .sqrt();

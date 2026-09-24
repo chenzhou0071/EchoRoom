@@ -13,8 +13,8 @@ pub const ROOM_CAPACITY: usize = 6;
 pub const FRAME_SAMPLES: usize = 960;
 /// 采样率
 pub const SAMPLE_RATE: u32 = 48000;
-/// Opus 目标码率
-pub const OPUS_BITRATE: i32 = 40_000;
+/// Opus 目标码率（语音 64kbps：全带宽 20kHz 所需）
+pub const OPUS_BITRATE: i32 = 64_000;
 /// 心跳间隔
 pub const HEARTBEAT_INTERVAL_MS: u64 = 2000;
 /// UDP 映射超时

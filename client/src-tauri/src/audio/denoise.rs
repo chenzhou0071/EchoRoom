@@ -1,16 +1,31 @@
 //! RNNoise 语音降噪封装（48kHz 单声道 i16，帧 480 样本 = 10ms）。
 //! 数据约定：nnnoiseless 的 f32 使用 i16 量程（[-32768, 32767]），
 //! 与管线内 i16 直接互转即可（不同于常见的 [-1, 1] 归一化）。
+//! 干湿混合：按 RNNoise 自带 VAD 概率自适应保留干信号（语音段留细节，噪声段全湿强抑制）。
 
 use nnnoiseless::DenoiseState;
 
 /// 单帧样本数（RNNoise 固定 10ms @ 48kHz）
 pub const FRAME: usize = DenoiseState::FRAME_SIZE;
 
+/// 语音段最多保留的干信号比例（VAD→1 时；兼顾降噪与高频自然度）
+const DRY_MIX_MAX: f32 = 0.25;
+/// 湿比平滑系数（每 10ms 帧更新）：约 100ms 时间常数，防混合突变泵动
+const MIX_SMOOTH: f32 = 0.15;
+
+/// VAD 概率 → 目标湿比：语音段（vad→1）降湿留干；噪声段（vad→0）全湿强抑制
+fn wet_coef_for(vad: f32) -> f32 {
+    1.0 - DRY_MIX_MAX * vad.clamp(0.0, 1.0)
+}
+
 pub struct Denoiser {
     state: Box<DenoiseState<'static>>,
     in_f32: [f32; FRAME],
     out_f32: [f32; FRAME],
+    /// 输入副本（干信号；与降噪输出混合用）
+    dry_f32: [f32; FRAME],
+    /// 平滑后的湿比（1.0 = 全湿，初始全湿随 VAD 收敛）
+    mix_wet: f32,
 }
 
 impl Denoiser {
@@ -25,6 +40,8 @@ impl Denoiser {
             state,
             in_f32: [0.0; FRAME],
             out_f32: [0.0; FRAME],
+            dry_f32: [0.0; FRAME],
+            mix_wet: 1.0,
         }
     }
 
@@ -36,12 +53,20 @@ impl Denoiser {
         for chunk in pcm.chunks_exact_mut(FRAME) {
             for (i, &s) in chunk.iter().enumerate() {
                 self.in_f32[i] = s as f32;
+                self.dry_f32[i] = s as f32;
             }
-            vad += self.state.process_frame(&mut self.out_f32, &self.in_f32);
+            let frame_vad = self.state.process_frame(&mut self.out_f32, &self.in_f32);
+            vad += frame_vad;
             n_frames += 1;
+            // 自适应干湿混合：湿比平滑逼近目标（防突变泵动）
+            let target = wet_coef_for(frame_vad);
+            self.mix_wet += (target - self.mix_wet) * MIX_SMOOTH;
+            let dry = 1.0 - self.mix_wet;
             for (i, s) in chunk.iter_mut().enumerate() {
                 // 输出可能略超 i16 量程，clamp 防止回绕
-                *s = self.out_f32[i].round().clamp(-32768.0, 32767.0) as i16;
+                *s = (self.out_f32[i] * self.mix_wet + self.dry_f32[i] * dry)
+                    .round()
+                    .clamp(-32768.0, 32767.0) as i16;
             }
         }
         if n_frames == 0 {
@@ -124,5 +149,16 @@ mod tests {
         d2.process(&mut noise);
         println!("[probe] 底噪输入 rms={r_in:.1} → 输出 rms={:.2}", rms(&noise));
         assert!(rms(&noise) < r_in, "底噪能量应被部分衰减");
+    }
+
+    #[test]
+    fn wet_coef_interpolates_by_vad() {
+        assert!((wet_coef_for(1.0) - 0.75).abs() < 1e-6, "语音段应保留 25% 干信号");
+        assert!((wet_coef_for(0.0) - 1.0).abs() < 1e-6, "噪声段应全湿");
+        assert_eq!(wet_coef_for(2.0), wet_coef_for(1.0), "越界概率须 clamp 到 1.0");
+        assert!(
+            wet_coef_for(0.5) > 0.75 && wet_coef_for(0.5) < 1.0,
+            "中间概率应线性插值"
+        );
     }
 }
