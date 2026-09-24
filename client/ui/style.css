@@ -198,9 +198,42 @@ body {
   background: var(--panel);
   border: 2px solid transparent; /* 预留蓝框位，避免 speaking 切换时布局跳动 */
   overflow: hidden;
-  transition: border-color 120ms ease;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+  position: relative; /* 说话光环（::after 内圈）定位基准 */
 }
-.member.speaking { border-color: var(--accent); }
+
+/* 说话光环（v4）：外光晕更宽 + 呼吸幅度更大（明显但不刺） */
+.member.speaking {
+  border-color: var(--accent); /* 兜底（不支持 color-mix 时） */
+  border-color: color-mix(in srgb, var(--accent) 85%, transparent);
+  box-shadow: 0 0 6px var(--accent-soft), 0 0 26px 4px var(--accent-soft); /* 旧内核兜底 */
+  box-shadow: 0 0 7px color-mix(in srgb, var(--accent) 45%, transparent),
+              0 0 26px 4px color-mix(in srgb, var(--accent) 28%, transparent); /* 静态基准（减少动态效果时展示） */
+  animation: speak-glow 1.8s ease-in-out infinite;
+}
+@keyframes speak-glow {
+  0%, 100% {
+    box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 35%, transparent),
+                0 0 20px 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 10px 1px color-mix(in srgb, var(--accent) 55%, transparent),
+                0 0 34px 6px color-mix(in srgb, var(--accent) 38%, transparent);
+  }
+}
+.member.speaking::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 2px var(--accent-soft), inset 0 0 14px var(--accent-soft); /* 兜底 */
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 32%, transparent),
+              inset 0 0 14px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .member.speaking { animation: none; }
+}
 
 /* 头像区 200×200（A 阶段占位剪影；C 阶段接真头像） */
 .member-avatar {
