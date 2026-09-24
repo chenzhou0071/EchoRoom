@@ -782,6 +782,10 @@ video.view-canvas {
 .settings-hint { margin-top: 10px; font-size: 12px; color: var(--err); }
 
 /* ---- D：音效页 ---- */
+.sound-volume { display: flex; align-items: center; gap: 10px; max-width: 420px; margin-bottom: 12px; }
+.sound-volume label { font-size: 13px; color: var(--text-dim); flex: none; }
+.sound-volume input[type="range"] { flex: 1; accent-color: var(--accent); }
+.sound-volume-val { font-size: 12px; color: var(--text-dim); min-width: 36px; text-align: right; flex: none; }
 .sound-list { display: flex; flex-direction: column; gap: 10px; max-width: 420px; }
 .sound-block {
   padding: 12px 14px;

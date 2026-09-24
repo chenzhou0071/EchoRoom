@@ -249,8 +249,12 @@ function renderOnline() {
 
 // ---- 音效：方案注册表（进入 / 退出；重连不重播；自己退出不播） ----
 // 新增音效 = 放 client/ui/sounds/<id>/in.mp3 + out.mp3，并在 SOUND_PACKS 加一行
-const SOUND_PACKS = [{ id: "default", name: "Default" }];
+const SOUND_PACKS = [
+  { id: "default", name: "Default" },
+  { id: "gugugaga", name: "咕咕嘎嘎" },
+];
 let soundPack = "default"; // 当前方案（init 从 config 读入；"none" = 关闭）
+let soundVolume = 0.5; // 提示音音量（0.0–1.0；init 从 config 读入，设置页滑条 0–100%）
 let everEntered = false; // 本进程内是否已首次进入过房间（重连不重播）
 const packAudios = new Map(); // `${id}:${kind}` → Audio（懒建；试听与实播共用）
 
@@ -259,7 +263,7 @@ function packAudio(id, kind) {
   let a = packAudios.get(key);
   if (!a) {
     a = new Audio("sounds/" + id + "/" + kind + ".mp3");
-    a.volume = 0.5;
+    a.volume = soundVolume;
     packAudios.set(key, a);
   }
   return a;
@@ -269,13 +273,15 @@ function packAudio(id, kind) {
 function playPackSnd(kind) {
   if (!FEATURES.sound || soundPack === "none") return;
   const a = packAudio(soundPack, kind);
+  a.volume = soundVolume; // 每次实播取当前音量
   a.currentTime = 0; // 连点重入时从头播，不叠音
   a.play().catch(() => {}); // 文件缺失/自动播放被阻止：静默忽略
 }
 
-// 试听（不影响选中）
+// 试听（不影响选中；音量与实播共用）
 function previewSound(id, kind) {
   const a = packAudio(id, kind);
+  a.volume = soundVolume;
   a.currentTime = 0;
   a.play().catch(() => {});
 }
@@ -1089,10 +1095,27 @@ async function selectSoundPack(id) {
 function buildSoundPane() {
   const list = el("sound-list");
   list.replaceChildren();
+  list.appendChild(soundBlock("none", "关闭（无提示音）", false)); // 固定开头：无试听按钮
   for (const pack of SOUND_PACKS) list.appendChild(soundBlock(pack.id, pack.name, true));
-  list.appendChild(soundBlock("none", "关闭（无提示音）", false)); // 固定末尾：关闭块无试听按钮
 }
 paneRefreshers.sound = buildSoundPane;
+
+// D：提示音音量滑条（0–100%；试听与实播共用；拖动实时生效，松手持久化）
+const soundVolSlider = el("sound-volume");
+const soundVolVal = el("sound-volume-val");
+function setSoundVolumeUi() {
+  const p = Math.round(soundVolume * 100);
+  soundVolSlider.value = String(p);
+  soundVolVal.textContent = p + "%";
+}
+soundVolSlider.addEventListener("input", () => {
+  soundVolume = Number(soundVolSlider.value) / 100;
+  soundVolVal.textContent = soundVolSlider.value + "%";
+  for (const a of packAudios.values()) a.volume = soundVolume; // 正在试听的音随手拖动实时变
+});
+soundVolSlider.addEventListener("change", () => {
+  invoke("set_sound_volume", { volume: soundVolume }).catch((e) => console.warn(e));
+});
 
 // ---- D：外观页·主题（6 套预设：底色系 + 强调色成套切换；文字/语义色不变） ----
 const THEMES = [
@@ -1409,6 +1432,9 @@ async function init() {
   videoCapture.setQuality(shareQuality);
   videoCapture.setCameraDevice(cfg.camera_device || ""); // D：摄像头设备（空 = 系统默认）
   soundPack = cfg.sound_pack || "default"; // D：音效方案（"none" = 关闭）
+  const sv = Number(cfg.sound_volume); // D：提示音音量（0–1；手改配置越界/非法值防御）
+  soundVolume = Number.isFinite(sv) ? Math.min(1, Math.max(0, sv)) : 0.5;
+  setSoundVolumeUi();
   if (FEATURES.background) refreshBackground(); // D：背景图（文件存在即铺层；无图静默；功能开关关闭时不读不铺）
   shareAudioOn = cfg.share_audio !== false;
   screenAudioOk = await invoke("screen_audio_supported").catch(() => false);

@@ -86,6 +86,11 @@
       </section>
       <section class="settings-pane" data-pane="sound" hidden>
         <h2 class="settings-title">音效</h2>
+        <div class="sound-volume">
+          <label for="sound-volume">音量</label>
+          <input id="sound-volume" type="range" min="0" max="100" step="1" />
+          <span class="sound-volume-val" id="sound-volume-val">50%</span>
+        </div>
         <div class="sound-list" id="sound-list"></div>
       </section>
       <section class="settings-pane" data-pane="appearance" hidden>

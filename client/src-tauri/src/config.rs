@@ -24,6 +24,10 @@ fn default_sound_pack() -> String {
     "default".into()
 }
 
+fn default_sound_volume() -> f32 {
+    0.5
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub server_addr: String,
@@ -66,6 +70,9 @@ pub struct Config {
     /// 进出音效方案（"default" / "none" / 未来 id）
     #[serde(default = "default_sound_pack")]
     pub sound_pack: String,
+    /// 进出音效播放音量（0.0–1.0；设置页滑条 0–100%）
+    #[serde(default = "default_sound_volume")]
+    pub sound_volume: f32,
 }
 
 impl Default for Config {
@@ -85,6 +92,7 @@ impl Default for Config {
             camera_device: String::new(),
             theme: "dianlan".into(),
             sound_pack: "default".into(),
+            sound_volume: 0.5,
         }
     }
 }
@@ -159,6 +167,7 @@ mod tests {
         cfg.camera_device = "cam-3".into();
         cfg.theme = "anzi".into();
         cfg.sound_pack = "none".into();
+        cfg.sound_volume = 0.25;
         cfg.save(&path).unwrap();
         let loaded = Config::load(&path);
         assert_eq!(loaded, cfg);
@@ -175,6 +184,7 @@ mod tests {
         assert!(loaded.camera_device.is_empty());
         assert_eq!(loaded.theme, "dianlan");
         assert_eq!(loaded.sound_pack, "default");
+        assert_eq!(loaded.sound_volume, 0.5);
         let _ = std::fs::remove_file(&path);
     }
 }

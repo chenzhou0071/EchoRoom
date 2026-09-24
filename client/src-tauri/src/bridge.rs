@@ -449,6 +449,13 @@ pub fn set_sound_pack(state: State<AppState>, pack: String) {
     persist(&state);
 }
 
+/// 设置进出音效音量（越界截断到 0.0–1.0；仅持久化——前端 init 读 config 应用）
+#[tauri::command]
+pub fn set_sound_volume(state: State<AppState>, volume: f32) {
+    state.config.lock().unwrap().sound_volume = volume.clamp(0.0, 1.0);
+    persist(&state);
+}
+
 /// 登录成功后：停旧音频管线，按新 uid/token/服务器地址启动（失败不影响文字聊天）。
 /// `tcp_tx` 供采集线程上报说话状态（VAD）。
 pub fn start_audio(
