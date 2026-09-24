@@ -153,7 +153,7 @@ pub fn spawn_audio_pipeline(
     let tx_pcm = udp_tx.tx_pcm.clone();
     let rx_voice = udp_rx.rx_voice;
 
-    // 采集线程：MicCapture → 累积 960 → 高通 → 降噪 → 咔嗒抑制 → 增益软限幅 → 压缩 → VAD → tx_pcm；
+    // 采集线程：MicCapture → 累积 960 → 高通 → 降噪 → 咔嗒抑制 → 低频突冲限制 → 增益软限幅 → 压缩 → VAD → tx_pcm；
     // 每轮检查设备偏好变化 → 线程内热切换（保降噪/VAD 状态，仅换句柄）
     {
         let stop = stop.clone();
@@ -171,6 +171,7 @@ pub fn spawn_audio_pipeline(
             let mut denoiser = Denoiser::new();
             let mut hpf = dsp::HighPass::new(dsp::MIC_HPF_HZ, SAMPLE_RATE as f32);
             let mut declicker = dsp::DeClicker::new(SAMPLE_RATE as f32);
+            let mut pop_limiter = dsp::PopLimiter::new(SAMPLE_RATE as f32);
             let mut leveller = dsp::Leveller::new();
             // 阈值实测自降噪后信号（底噪残留 ≈ 17、语音 ≥ 200）：进入 50 / 退出 25
             let mut detector = SpeakingDetector::new(50.0, 25.0, Duration::from_millis(400));
@@ -198,6 +199,7 @@ pub fn spawn_audio_pipeline(
                     hpf.process(&mut block); // 高通 100Hz：切爆破音/震动低频（治喷麦）
                     denoiser.process(&mut block); // RNNoise + 自适应干湿混合；960 = 480×2 帧
                     declicker.process(&mut block); // 咔嗒瞬态抑制：压键盘按键的高频脉冲（语音主体不动）
+                    pop_limiter.process(&mut block); // 低频突冲限制：压"噗"（读 3/p/b 气流冲麦的低频冲击），正常语音不动
                     // 采集增益 + 软限幅（f32 域一次完成）：增益调大 → VAD 更灵敏；
                     // 软限幅替代原硬 clamp：大声音/高增益平滑压缩，不再削顶爆音
                     let g = f32::from_bits(self_gain.load(Ordering::Relaxed));

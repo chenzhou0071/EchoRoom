@@ -107,11 +107,16 @@ pub fn gain_and_limit(pcm: &mut [i16], gain: f32) {
     }
 }
 
-/// 咔嗒/瞬态抑制（de-click）：键盘按键声这类">3kHz 极速脉冲"的专用降噪环节。
+/// 咔嗒/瞬态抑制（de-click v3）：键盘按键声这类">3kHz 极速脉冲"的专用降噪环节。
 /// 原理：3kHz 低通分带 —— 低频带 = LP(x)、高频带 = x − LP(x)，逐样本精确互补
-/// （不能用高通输出当高频带：它带相位偏移，压低后相加抵消不彻底）
-/// + 快/慢包络突起检测；命中时短促压低高频带增益后重构 out = x·g + (1−g)·LP(x)。
-/// g=1 逐样本还原；g→0 等价"只留低频带"：6kHz 咔嗒衰减 80%+，语音主体几乎不动。
+/// （不能用高通输出当高频带：它带相位偏移，压低后相加抵消不彻底）。
+/// 判定："延迟 15ms + 瞬态确认"——快包络突升后持续观察，真瞬态 = 快升快落
+/// （回落到事件峰值 25% 以下）→ 申请压制该起点起 8ms；升上去不回落（擦音/语音起跳）
+/// → 一直挂起不压（擦音结束时的回落判定因起点过旧自动作废）；观察中再次突升 2× 以上
+/// （持续音里的键击）→ 事件起点更新。压制施加在延迟 15ms 的流上：判定完成时触发点
+/// 样本恰好尚未输出，故能完整覆盖脉冲本体。命中时短促压低高频带增益后重构
+/// out = 低频带 + 高频带×g；g=1 逐样本还原；g→0 等价"只留低频带"：6kHz 咔嗒衰减 80%+，
+/// 语音/擦音主体不动（v2 的"条件续期"会误伤擦音 89ms——"高频被降"听感的根因，已废除）。
 const CLICK_CUTOFF_HZ: f32 = 3000.0;
 /// 突起判定比：快包络 ≥ 慢包络 ×4（+12dB 瞬时突起）视为瞬态
 const CLICK_RATIO: f32 = 4.0;
@@ -119,8 +124,16 @@ const CLICK_RATIO: f32 = 4.0;
 const CLICK_FLOOR: f32 = 200.0;
 /// 抑制深度（-24dB）
 const CLICK_DUCK: f32 = 0.06;
-/// 触发保持 8ms（384 样本）：覆盖脉冲本体与混响起头
+/// 压制窗口 8ms（384 样本）：确认后覆盖脉冲本体与混响起尾
 const CLICK_HOLD: u32 = 384;
+/// 判定延迟 15ms（720 样本）：触发后先观察确认，延迟线保证触发点样本尚未输出
+const CLICK_LOOKAHEAD: u32 = 720;
+/// 最小观察 3ms（144 样本）：包络成形前不判回落
+const CLICK_MIN_OBS: u32 = 144;
+/// 回落确认比：快包络 < 事件峰值×0.25 → 快升快落 = 真瞬态
+const CLICK_REL_DROP: f32 = 0.25;
+/// 观察中再次突升比：> 事件峰值×2 → 更强瞬态（持续音里的键击）→ 事件起点更新
+const CLICK_RESET_RATIO: f32 = 2.0;
 /// 快包络衰减 ≈ 5ms
 const CLICK_FAST_DECAY: f32 = 0.99584;
 /// 慢包络平均 ≈ 150ms
@@ -139,8 +152,21 @@ pub struct DeClicker {
     fast: f32,
     slow: f32,
     gain: f32,
-    hold: u32,
     warm: u32,
+    // 瞬态观察器：突升后持续跟踪，等"回落"确认真瞬态（无超时——持续音一直挂起，不压）
+    observing: bool,
+    obs_elapsed: u32,
+    obs_peak: f32,
+    obs_t0: u64,
+    // 压制计划（输入样本号区间 [plan_start, plan_end)）：支持合并，过旧自动作废
+    plan_start: u64,
+    plan_end: u64,
+    plan_active: bool,
+    // 延迟线（15ms）：判定完成时触发点样本恰好尚未输出，故能完整覆盖脉冲
+    d_low: [f32; CLICK_LOOKAHEAD as usize],
+    d_hf: [f32; CLICK_LOOKAHEAD as usize],
+    d_idx: usize,
+    pos: u64, // 当前输入样本号（单调递增）
 }
 
 impl DeClicker {
@@ -150,12 +176,39 @@ impl DeClicker {
             fast: 0.0,
             slow: 0.0,
             gain: 1.0,
-            hold: 0,
             warm: CLICK_WARMUP,
+            observing: false,
+            obs_elapsed: 0,
+            obs_peak: 0.0,
+            obs_t0: 0,
+            plan_start: 0,
+            plan_end: 0,
+            plan_active: false,
+            d_low: [0.0; CLICK_LOOKAHEAD as usize],
+            d_hf: [0.0; CLICK_LOOKAHEAD as usize],
+            d_idx: 0,
+            pos: 0,
         }
     }
 
-    /// 原地处理一个块（任意长度；跨块保状态）
+    /// 申请压制 [t0, t0 + CLICK_HOLD)：与现有计划重叠则合并；整体已被输出位置越过（过旧）则作废。
+    /// 过旧作废是"擦音结束才回落判定"不误压的关键：那时起点早已输出完毕。
+    fn schedule(&mut self, t0: u64, out_pos: i64) {
+        let end = t0 + CLICK_HOLD as u64;
+        if end as i64 <= out_pos {
+            return; // 过旧作废
+        }
+        if !self.plan_active || t0 >= self.plan_end || end <= self.plan_start {
+            self.plan_start = t0; // 无计划/完全不相交：替换
+            self.plan_end = end;
+        } else {
+            self.plan_start = self.plan_start.min(t0); // 重叠：合并（链式判定不互相覆盖）
+            self.plan_end = self.plan_end.max(end);
+        }
+        self.plan_active = true;
+    }
+
+    /// 原地处理一个块（任意长度；跨块保状态；输出整体延迟 15ms）
     pub fn process(&mut self, pcm: &mut [i16]) {
         for s in pcm.iter_mut() {
             let x = *s as f32;
@@ -169,17 +222,56 @@ impl DeClicker {
             if self.warm > 0 {
                 self.slow += (mag - self.slow) * CLICK_WARM_SLOW_COEF;
                 self.warm -= 1;
+            } else if self.observing {
+                if self.fast > self.obs_peak * CLICK_RESET_RATIO
+                    && self.fast > self.slow * CLICK_RATIO
+                    && self.fast > CLICK_FLOOR
+                {
+                    // 观察中再次突升：更强瞬态（持续音里的键击）→ 事件起点移到它
+                    self.obs_elapsed = 1;
+                    self.obs_peak = self.fast;
+                    self.obs_t0 = self.pos;
+                } else {
+                    self.obs_elapsed += 1;
+                    if self.fast > self.obs_peak {
+                        self.obs_peak = self.fast;
+                    }
+                    // 回落确认：快升快落 = 真瞬态 → 申请压制；持续不回落（擦音/语音）→ 继续挂起
+                    if self.obs_elapsed >= CLICK_MIN_OBS
+                        && (self.fast < self.obs_peak * CLICK_REL_DROP || self.fast < CLICK_FLOOR)
+                    {
+                        let out_pos = self.pos as i64 - CLICK_LOOKAHEAD as i64;
+                        self.schedule(self.obs_t0, out_pos);
+                        self.observing = false;
+                    }
+                }
             } else if self.fast > self.slow * CLICK_RATIO && self.fast > CLICK_FLOOR {
-                self.hold = CLICK_HOLD;
-            } else if self.hold > 0 {
-                self.hold -= 1;
+                self.observing = true;
+                self.obs_elapsed = 1;
+                self.obs_peak = self.fast;
+                self.obs_t0 = self.pos;
             }
-            let target = if self.hold > 0 { CLICK_DUCK } else { 1.0 };
+            // 延迟线：读出 15ms 前的分带结果、写入当前样本（判定时刻触发点尚未读出）
+            let o_low = self.d_low[self.d_idx];
+            let o_hf = self.d_hf[self.d_idx];
+            self.d_low[self.d_idx] = low;
+            self.d_hf[self.d_idx] = hf;
+            self.d_idx = (self.d_idx + 1) % CLICK_LOOKAHEAD as usize;
+            let out_pos = self.pos as i64 - CLICK_LOOKAHEAD as i64;
+            if self.plan_active && self.plan_end as i64 <= out_pos {
+                self.plan_active = false; // 计划整体越过输出位置 → 失效
+            }
+            let target = if self.plan_active && out_pos >= self.plan_start as i64 {
+                CLICK_DUCK
+            } else {
+                1.0
+            };
             let c = if target < self.gain { CLICK_ATTACK } else { CLICK_RELEASE };
             self.gain += (target - self.gain) * c;
-            // 互补重构：out = 低频带 + 高频带×g = x·g + (1−g)·LP(x)；g=1 逐样本还原
-            let out = low + hf * self.gain;
+            // 互补重构：out = 低频带 + 高频带×g；g=1 逐样本还原
+            let out = o_low + o_hf * self.gain;
             *s = out.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            self.pos += 1;
         }
     }
 }
@@ -232,6 +324,132 @@ impl Leveller {
             };
             self.gain += (target - self.gain) * c;
             let out = x * self.gain;
+            *s = out.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        }
+    }
+}
+
+/// 低频突冲限制器（PopLimiter）：治“噗”——读 3/p/b 时气流冲麦的低频强冲击（实测用户录音：
+/// 能量 84-97% 在 300Hz 以下、质心 100-250Hz、峰值满幅 0dB、1ms 极速起跳）。
+/// 触发闸门：250Hz 低通包络“快 ≥ 慢×4 且快 > 下限”——只认“低频突冲”（持续浊音不触发、高频咔嗒不触发）。
+/// 压制：命中窗口内把全带压向阈值平台 T（-18dB）——但深度动态：冲击多高压多少（小噗轻微、大噗压到平台），
+/// 双包络前瞻：当前包络提前降增益（防冲击前缘 1ms 起跳逃逸）、样本包络自限（防衰减段回血）。
+/// 10ms 延迟线：判定完成时触发点样本尚未输出，压制能盖住冲击本体；样本与包络同刻读出保持对齐。
+/// 与 Leveller 的区别：Leveller 管“持续过响”（慢、软、全时）；本环节管“瞬态突冲”（快、硬、专治低频噗）。
+const POP_LP_HZ: f32 = 250.0;
+/// 突冲判定比：快包络 ≥ 慢包络 ×4（持续音的峰均比约 2-3，不触发）
+const POP_RATIO: f32 = 4.0;
+/// 快包络绝对下限（-22dBFS）：正常语音低频（-30dB 级）达不到
+const POP_FLOOR: f32 = 0.08 * 32767.0;
+/// 压制平台阈值（-18dBFS）：命中时超过此值的部分被压回来
+const POP_THRESH: f32 = 0.12 * 32767.0;
+/// 增益下限（-24dB）：防极端冲击把增益压成 0
+const POP_GAIN_MIN: f32 = 0.06;
+/// 压制窗口 30ms：快包络波谷间断期间保持压制
+const POP_HOLD: u32 = 1440;
+/// 判定延迟 10ms（480 样本）：触发后触发点样本尚未输出
+const POP_DELAY: u32 = 480;
+/// 快包络衰减 ≈ 5ms
+const POP_FAST_DECAY: f32 = 0.99584;
+/// 慢包络平均 ≈ 150ms
+const POP_SLOW_COEF: f32 = 0.000139;
+/// 慢包络门控：快包络超过慢包络 3 倍时不更新慢包络（突冲不抬高环境基线，快速连击不丢触发）
+const POP_SLOW_GATE: f32 = 3.0;
+/// 慢包络门控下限（≈ -41dBFS）：静音底噪仍参与平均，防止 slow→0 后任何声都像突冲
+const POP_SLOW_FLOOR: f32 = 300.0;
+/// 全带峰值保持包络衰减 ≈ 30ms（压制深度参考：覆盖冲击整个持续段）
+const POP_ENV_DECAY: f32 = 0.99931;
+/// 增益下压 ≈ 1ms
+const POP_ATTACK: f32 = 0.08;
+/// 增益回升 ≈ 20ms
+const POP_RELEASE: f32 = 0.001;
+/// 启动预热 480 样本（10ms）：跳过滤波器冷启动瞬态
+const POP_WARMUP: u32 = 480;
+/// 预热期慢包络收敛系数（≈ 4ms）
+const POP_WARM_SLOW_COEF: f32 = 0.005;
+
+pub struct PopLimiter {
+    det: Biquad, // 250Hz 低通：检测带（噗的能量区）
+    fast: f32,
+    slow: f32,
+    env: f32,  // 全带峰值保持包络（压制额度参考）
+    gain: f32,
+    warm: u32,
+    hold: u32,
+    d_x: [f32; POP_DELAY as usize],   // 样本延迟线（10ms）
+    d_env: [f32; POP_DELAY as usize], // 包络延迟线（与样本同刻读出，增益永不错位）
+    d_idx: usize,
+}
+
+impl PopLimiter {
+    pub fn new(sample_rate: f32) -> Self {
+        Self {
+            det: Biquad::lowpass(POP_LP_HZ, sample_rate),
+            fast: 0.0,
+            slow: 0.0,
+            env: 0.0,
+            gain: 1.0,
+            warm: POP_WARMUP,
+            hold: 0,
+            d_x: [0.0; POP_DELAY as usize],
+            d_env: [0.0; POP_DELAY as usize],
+            d_idx: 0,
+        }
+    }
+
+    /// 原地处理一个块（任意长度；跨块保状态；输出整体延迟 10ms）
+    pub fn process(&mut self, pcm: &mut [i16]) {
+        for s in pcm.iter_mut() {
+            let x = *s as f32;
+            let mag = self.det.step(x).abs(); // 检测带：250Hz 低通
+            let magf = x.abs(); // 全带峰值：额度参考（输出是全带，额度必须覆盖全带）
+            self.fast = if mag > self.fast {
+                mag
+            } else {
+                self.fast * POP_FAST_DECAY
+            };
+            // 慢包络：突冲期间门控不更新（保持环境基线，快速连击不抬门槛）
+            if mag < self.slow.max(POP_SLOW_FLOOR) * POP_SLOW_GATE || self.warm > 0 {
+                let c = if self.warm > 0 {
+                    POP_WARM_SLOW_COEF
+                } else {
+                    POP_SLOW_COEF
+                };
+                self.slow += (mag - self.slow) * c;
+            }
+            // 全带峰值保持包络（30ms）：压制深度参考
+            self.env = if magf > self.env {
+                magf
+            } else {
+                self.env * POP_ENV_DECAY
+            };
+            if self.warm > 0 {
+                self.warm -= 1;
+            } else if self.fast > self.slow * POP_RATIO && self.fast > POP_FLOOR {
+                self.hold = POP_HOLD;
+            } else if self.hold > 0 {
+                self.hold -= 1;
+            }
+            // 延迟线：样本与包络同刻读出（增益永远作用于该样本自己时刻的幅度）
+            let xs = self.d_x[self.d_idx];
+            let de = self.d_env[self.d_idx];
+            self.d_x[self.d_idx] = x;
+            self.d_env[self.d_idx] = self.env;
+            self.d_idx = (self.d_idx + 1) % POP_DELAY as usize;
+            let target = if self.hold > 0 {
+                let a = POP_THRESH / (de + 1e-9); // 样本自身幅度：自限（防衰减段回血）
+                let b = POP_THRESH / (self.env + 1e-9); // 当前冲击幅度：前瞻（防前缘逃逸）
+                a.min(b).min(1.0).max(POP_GAIN_MIN)
+            } else {
+                1.0
+            };
+            let c = if target < self.gain {
+                POP_ATTACK
+            } else {
+                POP_RELEASE
+            };
+            self.gain += (target - self.gain) * c;
+            let out = xs * self.gain;
             *s = out.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         }
     }
@@ -334,12 +552,18 @@ mod tests {
 
     #[test]
     fn declick_low_tone_bit_transparent() {
-        // 纯低频（语音主体频段）：低频带 = 原信号 − 高频带，应逐样本恒等还原
+        // 纯低频（语音主体频段）：低频带 = 原信号 − 高频带，延迟对齐后逐样本恒等还原
         let mut dc = DeClicker::new(SR);
-        let mut sig = sine(400.0, 8000.0, 4800);
+        let n = 4800;
+        let mut sig = sine(400.0, 8000.0, n);
         let orig = sig.clone();
         dc.process(&mut sig);
-        for (a, b) in sig.iter().zip(orig.iter()) {
+        // 输出整体延迟 CLICK_LOOKAHEAD：out[D+i] ≡ in[i]；前 D 样本为延迟静默
+        let d = CLICK_LOOKAHEAD as usize;
+        for &a in &sig[..d] {
+            assert_eq!(a, 0, "延迟段应为静默");
+        }
+        for (a, b) in sig[d..].iter().zip(orig[..n - d].iter()) {
             assert!((*a as i32 - *b as i32).abs() <= 1, "低频被色变: {a} vs {b}");
         }
     }
@@ -357,31 +581,61 @@ mod tests {
         }
         let orig = sig.clone();
         dc.process(&mut sig);
-        // 咔嗒段 RMS 降 65% 以上
+        // 咔嗒段 RMS 降 65% 以上（输出延迟 D：咔嗒在 [1200+D, 1440+D)）
+        let d = CLICK_LOOKAHEAD as usize;
         let r_in = rms(&orig[1200..1440]);
-        let r_out = rms(&sig[1200..1440]);
+        let r_out = rms(&sig[1200 + d..1440 + d]);
         assert!(
             r_out < r_in * 0.35,
             "咔嗒压制不足: in={r_in:.0} out={r_out:.0}"
         );
-        // 200ms 后完全恢复（低频衬底逐样本还原）
-        for (a, b) in sig[9600..].iter().zip(orig[9600..].iter()) {
+        // 200ms 后完全恢复（低频衬底逐样本还原，含延迟平移）
+        for (a, b) in sig[9600 + d..].iter().zip(orig[9600..].iter()) {
             assert!((*a as i32 - *b as i32).abs() <= 2, "恢复不完全: {a} vs {b}");
         }
     }
 
     #[test]
-    fn declick_sustained_hf_only_touched_at_onset() {
-        // 持续高频（近似擦音 s）：起点短暂压制后恢复，长段能量保留 >95%
+    fn declick_sustained_hf_not_ducked() {
+        // 持续高频（近似擦音 s，读"3"的喷气音）：快包络升上去不回落 → 一直挂起观察、
+        // 全程零压制（v2 的"条件续期"会压 89ms——"高频被降"听感的根因，此测试防回归）
         let mut dc = DeClicker::new(SR);
-        let mut sig = sine(6000.0, 5000.0, 28800); // 600ms
+        let n = 28800;
+        let mut sig = sine(6000.0, 5000.0, n); // 600ms
         let orig = sig.clone();
         dc.process(&mut sig);
-        let tail_in = rms(&orig[9600..]);
-        let tail_out = rms(&sig[9600..]);
+        let d = CLICK_LOOKAHEAD as usize;
+        let from = 4800; // 跳过预热/观察建立段
+        for (i, (&a, &b)) in sig[from + d..].iter().zip(orig[from..].iter()).enumerate() {
+            assert!((a as i32 - b as i32).abs() <= 1, "擦音被压制: i={i} {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn declick_click_during_sustained_hf_suppressed() {
+        // 擦音持续中敲键盘（用户核心场景：说话时打字）：观察中的事件起点应被
+        // 新瞬态重置更新 → 键击照常被压（撤销重置路径后此测试会失败）
+        let mut dc = DeClicker::new(SR);
+        let n = 28800;
+        let mut sig = base_tone(n);
+        for i in 4800..14400 {
+            let t = i as f32 / SR;
+            let sib = f32::sin(2.0 * std::f32::consts::PI * 6000.0 * t) * 4000.0;
+            sig[i] = (sig[i] as f32 + sib).clamp(-32768.0, 32767.0) as i16;
+        }
+        for i in 9600..9696 {
+            let t = i as f32 / SR;
+            let click = f32::sin(2.0 * std::f32::consts::PI * 6000.0 * t) * 16000.0;
+            sig[i] = (sig[i] as f32 + click).clamp(-32768.0, 32767.0) as i16;
+        }
+        let orig = sig.clone();
+        dc.process(&mut sig);
+        let d = CLICK_LOOKAHEAD as usize;
+        let r_in = rms(&orig[9600..9840]);
+        let r_out = rms(&sig[9600 + d..9840 + d]);
         assert!(
-            tail_out > tail_in * 0.95,
-            "擦音尾部被过度压制: in={tail_in:.0} out={tail_out:.0}"
+            r_out < r_in * 0.45,
+            "擦音中键击未被压制: in={r_in:.0} out={r_out:.0}"
         );
     }
 
@@ -433,6 +687,116 @@ mod tests {
             .enumerate()
         {
             assert!((a as i32 - b as i32).abs() <= 2, "未恢复: i={i} {a} vs {b}");
+        }
+    }
+
+    /// 90Hz 阻尼正弦冲击（噗的核心形态）
+    fn pop_burst(amp: f32, n: usize) -> Vec<i16> {
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / SR;
+                (f32::sin(2.0 * std::f32::consts::PI * 90.0 * t) * amp * (-(i as f32) / 480.0).exp())
+                    as i16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pop_flattens_low_burst() {
+        // 满幅低频冲击（用户"噗"的实测形态）：应被压到 -18dB 平台（输出 < 0.17 满幅），
+        // 且冲击结束后增益恢复（尾部输出归零）
+        let mut pl = PopLimiter::new(SR);
+        let mut sig: Vec<i16> = vec![0; 2400];
+        sig.extend(pop_burst(30000.0, 5760));
+        sig.extend(std::iter::repeat(0).take(4800));
+        let mut out = sig.clone();
+        pl.process(&mut out);
+        let d = POP_DELAY as usize;
+        // 冲击位于输入 [2400, 8160) → 输出 [2400+d, 8160+d)
+        let peak = out[2400 + d..8160 + d]
+            .iter()
+            .map(|&v| (v as i32).abs())
+            .max()
+            .unwrap();
+        assert!(peak < 5500, "满幅冲击未被压到平台: peak={peak}");
+        let tail = out[8160 + d..]
+            .iter()
+            .map(|&v| (v as i32).abs())
+            .max()
+            .unwrap();
+        assert!(tail < 500, "冲击后未恢复: tail={tail}");
+    }
+
+    #[test]
+    fn pop_suppresses_moderate_burst() {
+        // 中等幅度突发（0.34 满幅，用户录音里的"小噗"）：同样被压到平台
+        let mut pl = PopLimiter::new(SR);
+        let mut sig: Vec<i16> = vec![0; 2400];
+        sig.extend(pop_burst(11000.0, 5760));
+        sig.extend(std::iter::repeat(0).take(4800));
+        let mut out = sig.clone();
+        pl.process(&mut out);
+        let d = POP_DELAY as usize;
+        let peak = out[2400 + d..8160 + d]
+            .iter()
+            .map(|&v| (v as i32).abs())
+            .max()
+            .unwrap();
+        assert!(peak < 5500, "中等冲击未被压到平台: peak={peak}");
+    }
+
+    #[test]
+    fn pop_transparent_on_voice() {
+        // 正常语音（130/260/390Hz 谐波复合）低于快慢比闸门：不得触发，逐样本透明（含 10ms 延迟平移）
+        let mut pl = PopLimiter::new(SR);
+        let n = 19200;
+        let mut sig: Vec<i16> = (0..n)
+            .map(|i| {
+                let t = i as f32 / SR;
+                (f32::sin(2.0 * std::f32::consts::PI * 130.0 * t) * 4000.0
+                    + f32::sin(2.0 * std::f32::consts::PI * 260.0 * t) * 2200.0
+                    + f32::sin(2.0 * std::f32::consts::PI * 390.0 * t) * 1400.0)
+                    as i16
+            })
+            .collect();
+        let orig = sig.clone();
+        pl.process(&mut sig);
+        let d = POP_DELAY as usize;
+        for (i, (&a, &b)) in sig[d..].iter().zip(orig[..n - d].iter()).enumerate() {
+            assert!((a as i32 - b as i32).abs() <= 2, "语音被改动: i={i} {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn pop_transparent_on_sustained_low_tone() {
+        // 持续低频浊音（低音嗓）：慢包络跟得上快包络（峰均比 ≈1.6）→ 不触发、透明
+        let mut pl = PopLimiter::new(SR);
+        let n = 28800;
+        let mut sig = sine(150.0, 3000.0, n);
+        let orig = sig.clone();
+        pl.process(&mut sig);
+        let d = POP_DELAY as usize;
+        for (i, (&a, &b)) in sig[d..].iter().zip(orig[..n - d].iter()).enumerate() {
+            assert!((a as i32 - b as i32).abs() <= 2, "持续浊音被压: i={i} {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn pop_ignores_hf_click() {
+        // 高频脉冲（键盘/擦音属性）：250Hz 检测带里几乎无能量 → 不触发、透明
+        let mut pl = PopLimiter::new(SR);
+        let n = 9600;
+        let mut sig: Vec<i16> = vec![0; n];
+        for i in 4800..5760 {
+            let t = (i - 4800) as f32 / SR;
+            sig[i] = (f32::sin(2.0 * std::f32::consts::PI * 6000.0 * t) * 20000.0
+                * (-((i - 4800) as f32) / 96.0).exp()) as i16;
+        }
+        let orig = sig.clone();
+        pl.process(&mut sig);
+        let d = POP_DELAY as usize;
+        for (&a, &b) in sig[d..].iter().zip(orig[..n - d].iter()) {
+            assert!((a as i32 - b as i32).abs() <= 2, "高频脉冲被误动: {a} vs {b}");
         }
     }
 }
